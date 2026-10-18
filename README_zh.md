@@ -70,4 +70,47 @@ EBO 机器人的家庭语音助手，**不用唤醒词**，自然接话：
 
 ## 开发日志
 
-（从这里往下续写。）
+好的，开始吐槽。
+
+当前版本加上了自动跟人的功能，结果围绕这个功能又迎来了新一轮的问题。
+
+其实之前就说过，因为它是一个鱼眼镜头，确实需要对它进行调参和适配。最开始配置的那套虽然调了，但其实不太行。不过上一轮优化已经对判断人是远是近做了调整，所以问题其实不在这儿。
+
+核心问题在于：它现在往前追人或者转向的动力太小了，无法克服地板对轮子的摩擦力，所以在追人这块效果不太好。
+
+能改是能改的，但是得等 token 重置。
+
+此外它还有问题。首先说明一下，因为现在这个项目运行在我的电脑上，跟 Ebo bot 之间隔着半个地球，所以虽然我这边电脑请求 AI 没有问题、本地时延可以，但一来一回跑了整整一个地球，基础时延本来就比较高，起码在 2 到 2.5 秒级别。
+
+之前给它加了一层过滤，是因为 Qwen 这个模型本身不带 noise reduction。不做降噪就无法过滤掉环境里电视的声音，这部分只能由我来处理。具体做法之前也讲过：加了一层 layer，先用一个小模型判断当前这句话到底是不是用户在跟机器人讲。
+
+但这么一层层 filtering layer 加下来，叠加上原本的网络时延，现在用户说一句话要 5 秒它才会回答。这就很容易出现一种情况：用户说完第一句话稍微顿了一下，接着说第二句，这时机器人那边才返回第一句的回答并念出来，跟用户之间始终隔着一个非常大的 gap。我自己测下来，5 秒确实太长了。
+
+不过这个问题好解：只要把它部署在机器人旁边那台电脑（我家人那台电脑）上，这些问题就都不复存在了。所以这个先放一边，还不算核心问题。
+
+真正严重的问题看这张图，这是昨天的记录：它又开始重复自己的话了。我先补充一下，因为给它设置了两层 transcribe，重复次数其实已经减半了，但就算减半，它还是重复了自己好几句，这个才是真正的问题。
+
+<img width="551" height="628" alt="image" src="https://github.com/user-attachments/assets/47248552-5a2a-4ff2-b39d-7874fc31a76f" />
+
+下面是 Claude Code 分析出来的，但讲道理我其实没太懂这件事情。
+
+我确实不是很理解，为什么电视或者手机短视频的声音，会有这种"做一件事重复三遍"的情况。我确实没想明白这个场景到底是怎么回事，自然也就没搞懂它这边问题究竟是出在哪儿。不过先照着用它的 fix 跑一下吧。
+
+其实这一切的原因，都是因为 noise reduction 的问题。之前用 OpenAI 的 Realtime 模型时，它能很好地把电视声、东西掉落声这类杂音区分出来，所以用 OpenAI Realtime 的时候完全没有这个问题。但现在这个 Qwen 它不是不支持嘛，所以还是得对它做一些针对现实物理环境的适配
+
+claude code:
+
+Why it kept repeating "我在听":
+
+False wake: at 02:53 the TV was on, and Whisper produced a classic hallucination, "做一件事做一件事做一件事" (one phrase repeated three times). The AI judge took it as someone talking to the robot and woke it.
+My timeout rule did the rest: after each turn the program waits for Qwen’s transcript. Under the old rule, if it wasn’t back within 6 seconds it replied anyway. Qwen’s transcription of TV noise is often slow (over 6 seconds) and comes back empty, so the model received empty turns again and again and could only answer "我在听".
+It couldn’t stop:
+Late transcripts were applied to the next turn as that turn’s text.
+Each of those replies counted as activity, so the conversation never timed out. It went on for nearly half an hour.
+
+Fixes:
+
+No more blind reply on timeout: if Qwen’s transcript isn’t back within 3 seconds, this turn’s audio is transcribed with local Whisper instead (about 0.5 seconds). Empty means silence; real speech is still answered.
+Transcripts are matched by turn ID: late ones are discarded, never applied to another turn.
+Repeated-phrase hallucinations are filtered: text like "做一件事做一件事做一件事" no longer wakes it. Ordinary repetition like "你好你好" is unaffected.
+
