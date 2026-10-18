@@ -31,6 +31,10 @@ face_recognition:
 objects:
   track:
     - person
+  filters:
+    person:
+      # 默认 0.7：沙发上趴着/坐着/只露半身的人常常到不了（YOLOv9 误认少，可以放宽）
+      threshold: 0.6
 
 record:
   enabled: false

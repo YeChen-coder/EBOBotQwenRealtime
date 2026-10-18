@@ -7,3 +7,4 @@ webrtcvad-wheels==2.0.14
 python-dotenv>=1.0.0
 faster-whisper>=1.1,<2  # Standby 唤醒的本地 Whisper 转录（CPU，无需 PyTorch）
 opencc-python-reimplemented==0.1.7  # Whisper 繁体输出转简体
+onnxruntime>=1.18,<2  # 找人转圈时直接跑 YOLOv9

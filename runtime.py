@@ -22,6 +22,7 @@ from ebo_transport import AudioStore, AssistantOutputStore, EboAPI, Speaker, Tra
 from monitoring import (DASHBOARD_HTML, LogBuffer, add_ice_host, mjpeg_url,
                         recent_conversation, setup_logging, whep_url)
 from person_tracker import PersonTracker
+from scan_detector import ScanDetector
 from standby_voice import StandbyVoice, VoiceTurn
 from state import RuntimeState
 
@@ -268,6 +269,7 @@ class MediaCapture:
     def audio_health_loop(self):
         """音频健康检查循环；每分钟顺带检查机器人状态（充电/桌面模式）"""
         next_robot_check = 0.0
+        next_night_vision = 0.0
         while not self.stopping.is_set():
             if time.monotonic() >= next_robot_check:
                 # 视觉跟随要尽快知道机器人是否在充电座上（在座上不能原地转）
@@ -276,6 +278,9 @@ class MediaCapture:
                     robot = self.ebo.robot_state()
                     if self.config.floor_mode and self.ebo.ensure_floor_mode(robot):
                         robot['desktop_mode'] = 'false'
+                    if self.config.night_vision_auto and time.monotonic() >= next_night_vision:
+                        self.ebo.set_night_vision_auto()
+                        next_night_vision = time.monotonic() + 6 * 3600
                     self.state.update(
                         robot_docked=str(robot.get('docked')).lower() == 'true',
                         robot_charging=str(robot.get('charging')).lower() == 'true',
@@ -557,6 +562,15 @@ def main():
             config, state, ebo.command,
             allowed=lambda: supervisor.enabled and not state.snapshot()['input_speech_active'],
         )
+        if config.tracking_scan_enabled:
+            try:
+                scanner = ScanDetector(config.scan_model_path,
+                                       f'{config.frigate_url.rstrip("/")}/api/{config.camera_name}/latest.jpg',
+                                       config.scan_min_score)
+                tracker.scan = scanner.people
+                LOG.info('Search scan enabled (min score %.2f)', config.scan_min_score)
+            except Exception as exc:
+                LOG.warning('Search scan unavailable, relying on Frigate only: %s', exc)
         tracker.start_mqtt()
         supervisor.tracker = tracker
         threads.append(threading.Thread(target=tracker.run, daemon=True, name='person-tracker'))

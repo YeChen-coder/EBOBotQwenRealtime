@@ -34,6 +34,8 @@ services:
       - ./logs:/app/logs
       # Whisper 模型缓存，避免每次重建容器都重新下载
       - ./data/hf-cache:/root/.cache/huggingface
+      # 找人转圈时自己识别用的 YOLOv9（与 Frigate 同一个模型文件）
+      - ./frigate/models:/models:ro
     networks:
       ebo:
         # Engine 回退播放时按这个名字来下载回复音频

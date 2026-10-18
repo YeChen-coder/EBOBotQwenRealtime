@@ -108,6 +108,12 @@ class EboAPI:
         LOG.warning("Robot desk mode was on; turned it off (robot lives on the floor)")
         return True
 
+    def set_night_vision_auto(self) -> None:
+        """夜视设成 Auto（暗了自动切夜视）。机器人上报的 night_vision 一直是 Day、从不刷新，
+        不能按上报值判断，所以由调用方定期发送。"""
+        self.command("night_vision/set", "Auto")
+        LOG.info("Robot night vision set to Auto")
+
     def wake_if_due(self) -> None:
         snapshot = self.state.snapshot()
         # A video failure is never a reason to rejoin a working microphone.

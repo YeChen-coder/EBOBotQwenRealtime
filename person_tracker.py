@@ -1,6 +1,6 @@
-"""视觉跟随：Frigate 检测到人 -> 转向让人居中，太远则前进。
+"""视觉跟随：Frigate 检测到人 -> 按角度转向让人居中，太远就往前走一段。
 
-“动一下、看一下”：每次移动都很短（hold 到期由 Engine 自动停车），
+“动一下、看一下”：每次转向/前进后（前进由 hold 到期自动停车），
 之后必须收到移动结束后的新检测才会再动，避免按过时的 box 转过头。
 不倒车（机器人没有后视），人太近时只停住。
 
@@ -18,16 +18,20 @@ from urllib import request
 
 LOG = logging.getLogger('ebo-person-tracker')
 
-DEAD_ZONE = 0.2          # 画面中心 ±20% 内不转向
-TURN_GAIN = 45           # 人在画面边缘时的转向量（EBO 取值范围 ±100）
-MIN_TURN = 20            # 小于此值机器人可能转不动
-FORWARD_SPEED = 60       # 实测 40 走得太少
-FORWARD_MAX_OFFSET = 0.4 # 人偏离中心太多时只转不走
+# 转向用“按角度转”（103001）：以前用摇杆小幅转（力度 20、0.6 秒）基本转不动，
+# 一天多发了五千多次转向、人始终不在中间，所以几乎没往前走过
+HFOV_DEG = 76            # 画面横向视角（实测：转 45° 画面平移约 60% 宽度）
+MIN_ROTATE_DEG = 6       # 偏差小于这个角度不转，避免来回抖
+MAX_ROTATE_DEG = 60
+DEAD_ZONE = MIN_ROTATE_DEG / (HFOV_DEG / 2)
+FORWARD_SPEED = 70
+FAR_HOLD = 2.0           # 很远（框高 < VERY_FAR_HEIGHT）一次走 2 秒
+NEAR_HOLD = 1.2          # 稍远一次走 1.2 秒
+VERY_FAR_HEIGHT = 0.3
 # 远近按人框高度判断（广角镜头贴地仰拍：面积会把远处站着的人算大；水平方向畸变也比垂直大）
 FAR_HEIGHT = 0.5         # 头没被切掉、框高不到画面一半：远，往前走（实测隔壁房间站着的人约 0.29）
 CLOSE_HEIGHT = 0.8       # 框高超过画面 80%：近，停住
 EDGE = 0.03              # 框贴到画面上/下边缘（头或脚被切掉）
-MOVE_HOLD = 0.6          # 每次移动的时长（秒）
 # 在充电座上原地转向会卡在座上：先笔直开出去（实测 70 x 2 秒能明显离开），再开始跟人
 EXIT_SPEED = 70
 EXIT_HOLD = 2.5
@@ -35,8 +39,8 @@ EXIT_HOLD = 2.5
 NEAR_DOCK_TRAVEL = 6.0
 SETTLE = 0.4             # 停车后等画面稳定再采信新检测
 DETECTION_MAX_AGE = 1.5  # 超过此时长的检测视为过时
-SEARCH_STEP_DEGREES = 45 # 找人时每次原地转的角度（正值右转，实测约 2 秒转完）
-SEARCH_STEPS = 8         # 8 x 45° = 一整圈
+SEARCH_STEP_DEGREES = 30 # 找人时每次原地转的角度（正值右转，实测 45° 约 2 秒转完）
+SEARCH_STEPS = 24        # 24 x 30° = 转两圈
 SEARCH_STEP_WAIT = 3.5   # 转完 + 画面稳定 + Frigate 出检测结果
 DOCK_RETRY_SECONDS = 300 # 发了回充但还没充上电，这么久之后再试一次
 
@@ -46,6 +50,7 @@ class Detection:
     object_id: str
     box: tuple[float, float, float, float]
     received_at: float
+    stationary: bool = False
 
 
 def _contains(outer, inner) -> bool:
@@ -89,6 +94,9 @@ class PersonTracker:
         self.lock = threading.Lock()
         self.tracks: dict[str, Detection] = {}
         self.target: str | None = None
+        self.settled: str | None = None  # 已对准、距离合适的那个人
+        # 找人转圈时用的直接识别（ScanDetector.people），由 runtime 注入；None 表示只靠 Frigate
+        self.scan = None
         self.next_look_at = 0.0  # 此时间之前收到的检测不采信
         self.dock_after = config.tracking_dock_after_seconds
         self.last_person_at = time.monotonic()
@@ -127,7 +135,12 @@ class PersonTracker:
         if not isinstance(object_id, str):
             return
         with self.lock:
+            if payload.get('type') == 'new':
+                LOG.info('Frigate person %s: score %.2f box %s', object_id, float(event.get('score') or 0),
+                         [round(float(v)) for v in event.get('box') or []])
             if payload.get('type') == 'end' or event.get('end_time') is not None:
+                if object_id in self.tracks:
+                    LOG.info('Frigate person %s gone (top score %.2f)', object_id, float(event.get('top_score') or 0))
                 self.tracks.pop(object_id, None)
                 if self.target == object_id:
                     self.target = None
@@ -139,7 +152,7 @@ class PersonTracker:
                 box = tuple(float(v) for v in box)
             except (TypeError, ValueError):
                 return
-            self.tracks[object_id] = Detection(object_id, box, now)
+            self.tracks[object_id] = Detection(object_id, box, now, bool(event.get('stationary')))
 
     def decide(self, now: float) -> dict | None:
         """返回本步要发的移动向量，或 None（不动）。"""
@@ -163,22 +176,38 @@ class PersonTracker:
         x1, y1, x2, y2 = target.box
         offset = ((x1 + x2) / 2 / width) * 2 - 1  # -1 左 .. 1 右
         distance = person_distance(target.box, width, height)
+        height_ratio = (y2 - y1) / height
+        self.state.update(tracking_offset=round(offset, 2), tracking_distance=distance,
+                          tracking_height_ratio=round(height_ratio, 2))
 
-        rx = 0
-        if abs(offset) > DEAD_ZONE:
-            magnitude = max(MIN_TURN, min(TURN_GAIN, round(abs(offset) * TURN_GAIN)))
-            rx = magnitude if offset > 0 else -magnitude
-        ly = 0
-        if distance == 'far' and abs(offset) <= FORWARD_MAX_OFFSET:
-            ly = -FORWARD_SPEED  # ly < 0 为前进
-
-        status = ('too_close' if distance == 'close' else
-                  'centered' if not (rx or ly) else 'following')
-        self.state.update(tracking_status=status, tracking_offset=round(offset, 2), tracking_distance=distance,
-                          tracking_height_ratio=round((y2 - y1) / height, 2))
-        if not (rx or ly):
+        # 已经对准过、一直没动的人（睡觉、坐着看电视）：不再反复调整，夜里电机就不会一直响
+        if target.stationary and target.object_id == self.settled:
+            self.state.update(tracking_status='centered')
             return None
-        return {'ly': ly, 'rx': rx}
+
+        move = None
+        if abs(offset) > DEAD_ZONE:
+            # 先对准再走：正角度右转（实测 +45° 右转约 2 秒）
+            angle = max(-MAX_ROTATE_DEG, min(MAX_ROTATE_DEG, round(offset * HFOV_DEG / 2)))
+            move = {'rotate': angle}
+        elif distance == 'far':
+            move = {'forward': FAR_HOLD if height_ratio < VERY_FAR_HEIGHT else NEAR_HOLD}
+
+        if move is None:
+            self.settled = target.object_id
+            self.state.update(tracking_status='too_close' if distance == 'close' else 'centered')
+        else:
+            self.settled = None
+            self.state.update(tracking_status='following')
+        return move
+
+    def _drive(self, speed: int, hold: float, what: str) -> bool:
+        ok = self._send('move/vector', json.dumps({'lx': 0, 'ly': -speed, 'rx': 0, 'ry': 0,
+                                                   'hold': hold, 'buttons': 1}), what)
+        if ok:
+            self.left_dock = True
+            self.travel += speed / 60 * hold
+        return ok
 
     def _send(self, suffix: str, payload: str, what: str) -> bool:
         try:
@@ -224,22 +253,22 @@ class PersonTracker:
                 return None
             if on_dock:
                 # 在座上不能原地转（会卡住），先笔直开出去，下一轮再按人的位置调整
-                move = {'ly': -EXIT_SPEED, 'rx': 0}
-                if self._send('move/vector', json.dumps({'lx': 0, 'ly': -EXIT_SPEED, 'rx': 0, 'ry': 0,
-                                                         'hold': EXIT_HOLD, 'buttons': 1}), 'Leave dock'):
+                if self._drive(EXIT_SPEED, EXIT_HOLD, 'Leave dock'):
                     LOG.info('Person seen; driving straight off the dock first')
-                    self.left_dock = True
-                    self.travel += EXIT_SPEED / 60 * EXIT_HOLD
                 self.next_look_at = now + EXIT_HOLD + SETTLE
                 self.state.update(tracking_status='leaving_dock')
-                return move
-            payload = json.dumps({'lx': 0, 'ly': move['ly'], 'rx': move['rx'], 'ry': 0,
-                                  'hold': MOVE_HOLD, 'buttons': 1})
-            if self._send('move/vector', payload, 'Move command'):
-                LOG.info('Following person: ly=%d rx=%d', move['ly'], move['rx'])
-                self.left_dock = True
-                self.travel += abs(move['ly']) / 60 * MOVE_HOLD
-            self.next_look_at = now + MOVE_HOLD + SETTLE
+                return {'forward': EXIT_HOLD, 'exit': True}
+            if 'rotate' in move:
+                angle = move['rotate']
+                if self._send('cmd', json.dumps({'id': 103001, 'data': {'angle': angle}}), 'Turn command'):
+                    LOG.info('Turning %+d deg toward person', angle)
+                    self.left_dock = True
+                # 转完（约 2 秒/45°）+ 画面稳定 + Frigate 出新检测，之前的框都不采信
+                self.next_look_at = now + 0.8 + abs(angle) / 45 * 1.6 + SETTLE
+            else:
+                if self._drive(FORWARD_SPEED, move['forward'], 'Approach'):
+                    LOG.info('Approaching person for %.1fs', move['forward'])
+                self.next_look_at = now + move['forward'] + SETTLE
             return move
         return self._absent_step(now)
 
@@ -267,9 +296,14 @@ class PersonTracker:
                          absent / 60, self.travel)
                 self.search_steps_left = 0
             else:
-                LOG.info('No person for %.0f min; turning around to look before returning to dock',
+                LOG.info('No person for %.0f min; turning around twice to look before returning to dock',
                          absent / 60)
                 self.search_steps_left = SEARCH_STEPS
+        if self.search_steps_left > 0 and self.scan is not None:
+            # 每停稳一个方向先自己看一眼：沙发上趴着/坐着/半身的人 Frigate 常常认不出
+            found = self._scan_for_person(now)
+            if found is not None:
+                return found
         if self.search_steps_left > 0:
             self.search_steps_left -= 1
             self._send('cmd', json.dumps({'id': 103001, 'data': {'angle': SEARCH_STEP_DEGREES}}),
@@ -283,6 +317,27 @@ class PersonTracker:
         self.dock_requested_at = now
         self.state.update(tracking_status='returning_to_dock')
         return {'dock': True}
+
+    def _scan_for_person(self, now: float) -> dict | None:
+        try:
+            people, (scan_w, scan_h) = self.scan()
+        except Exception as exc:
+            LOG.warning('Search scan failed: %s', exc)
+            return None
+        if not people:
+            return None
+        width, height = self.frame_size(now)
+        score, box = max(people, key=lambda p: (p[1][2] - p[1][0]) * (p[1][3] - p[1][1]))
+        box = (box[0] * width / scan_w, box[1] * height / scan_h, box[2] * width / scan_w, box[3] * height / scan_h)
+        with self.lock:
+            self.tracks['scan'] = Detection('scan', box, now)
+            self.target = 'scan'
+        self.last_person_at = now
+        self.searching = False
+        self.search_steps_left = 0
+        LOG.info('Search found a person (score %.2f); following', score)
+        self.state.update(tracking_status='following')
+        return {'found': round(score, 2)}
 
     def rest(self, seconds: float):
         """已经发了回充命令：一段时间内不追人，也不再自己转圈找人/重复回充。"""
