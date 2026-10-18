@@ -1,0 +1,66 @@
+mqtt:
+  enabled: true
+  host: mosquitto
+  port: 1883
+
+# Portable CPU decode/detection. EBO Engine supplies its existing RTSP stream.
+ffmpeg:
+  path: "7.0"
+
+detectors:
+  openvino:
+    type: openvino
+    device: CPU
+
+# YOLOv9-s 320（Frigate 官方推荐的 OpenVINO 模型）。原自带的 SSDLite MobileNet v2
+# 在机器人贴地仰拍的画面上漏检半身的人、还会把搭着衣服的椅子认成人。
+# 模型文件由 frigate/models/README.md 里的命令导出
+model:
+  model_type: yolo-generic
+  width: 320
+  height: 320
+  input_tensor: nchw
+  input_dtype: float
+  path: /models/yolov9-s-320.onnx
+  labelmap_path: /labelmap/coco-80.txt
+
+# 本项目只用人体检测（视觉跟随），不做人脸识别：省 CPU、不用下载人脸模型
+face_recognition:
+  enabled: false
+
+objects:
+  track:
+    - person
+
+record:
+  enabled: false
+snapshots:
+  enabled: false
+
+cameras:
+  ebo:
+    enabled: true
+    ffmpeg:
+      inputs:
+        - path: "{FRIGATE_EBO_RTSP_URL}"
+          # Only subscribe to video. The assistant consumes Opus separately;
+          # unused audio timestamps must not disrupt Frigate's video decoder.
+          input_args:
+            - -rtsp_transport
+            - tcp
+            - -timeout
+            - "10000000"
+            - -use_wallclock_as_timestamps
+            - "1"
+            - -allowed_media_types
+            - video
+            - -fflags
+            - +genpts+discardcorrupt
+          roles: [detect]
+    detect:
+      enabled: true
+      # 机器人摄像头原始画面就是 640x360，放大到 1280x720 只会白耗 CPU
+      width: 640
+      height: 360
+      fps: 5
+version: 0.18-0

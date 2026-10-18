@@ -1,0 +1,112 @@
+# EBO 通义千问助手：全部组件都在本项目里，不依赖 ebo-ai-home。
+#   ebo-engine  机器人云端协议适配（音视频、控制），源码在 ./engine
+#   frigate     人体检测（视觉跟随用）
+#   mosquitto   Frigate 事件总线
+#   assistant   本项目的语音助手 + 看板 http://127.0.0.1:8099/
+# 启动：docker compose up -d     停止：docker compose stop
+name: ebo-qwen
+
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  assistant:
+    build: .
+    image: ebo-qwen/assistant:local
+    container_name: ebo-qwen-assistant
+    restart: unless-stopped
+    depends_on: [ebo-engine, frigate, mosquitto]
+    env_file:
+      - .env
+    environment:
+      # 通义千问单次连接最长 30 分钟
+      EBO_SESSION_MAX_SECONDS: "1740"
+      EBO_LOG_DIR: /app/logs
+      TZ: ${TZ:-America/Toronto}
+    ports:
+      # 看板只在本机可访问
+      - "127.0.0.1:8099:8099"
+    volumes:
+      - ./data:/data
+      - ./logs:/app/logs
+      # Whisper 模型缓存，避免每次重建容器都重新下载
+      - ./data/hf-cache:/root/.cache/huggingface
+    networks:
+      ebo:
+        # Engine 回退播放时按这个名字来下载回复音频
+        aliases: [realtime-assistant]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8099/health', timeout=3)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging: *bounded-logging
+
+  ebo-engine:
+    build: ./engine
+    image: ebo-qwen/ebo-engine:0.26.100
+    container_name: ebo-qwen-engine
+    platform: linux/amd64
+    restart: unless-stopped
+    ports:
+      - "8098:8098"
+      # 机器人控制面板（没有登录保护，只开放给本机）
+      - "127.0.0.1:8101:8099"
+      - "8554-8557:8554-8557"
+      # WebRTC：看板的实时画面经由这里
+      - "8189-8192:8189-8192/tcp"
+      - "8189-8192:8189-8192/udp"
+    expose:
+      - "8200"
+    volumes:
+      # 机器人账号、配对信息（options.json 等），不要提交
+      - ./data/engine:/data
+    environment:
+      EBO_API_HOST: ebo-engine
+      EBO_TALK_STREAM_PORT: "8200"
+      EBO_HOST_LOG_PATH: /data/logs/ebo-engine.log
+      EBO_HOST_LOG_MAX_BYTES: "10485760"
+      EBO_HOST_LOG_BACKUP_COUNT: "5"
+      EBO_AGORA_AEC_ENABLED: "false"
+      EBO_AGORA_NOISE_SUPPRESSION_ENABLED: "true"  # 机器人麦克风降噪（风扇、空调等稳定噪声）
+      EBO_AGORA_AGC_ENABLED: "false"
+      TZ: ${TZ:-America/Toronto}
+    networks: [ebo]
+    logging: *bounded-logging
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: ebo-qwen-mosquitto
+    restart: unless-stopped
+    volumes:
+      - ./frigate/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    networks: [ebo]
+    logging: *bounded-logging
+
+  frigate:
+    image: ghcr.io/blakeblackshear/frigate@sha256:82d7475ba7e5f950911bd9d06f2392de96881f39eeacd78824a526dde9b5cad9
+    container_name: ebo-qwen-frigate
+    restart: unless-stopped
+    stop_grace_period: 30s
+    shm_size: "256mb"
+    depends_on: [ebo-engine, mosquitto]
+    environment:
+      FRIGATE_EBO_RTSP_URL: rtsp://ebo-engine:8554/ebo
+      TZ: ${TZ:-America/Toronto}
+    volumes:
+      - ./data/frigate:/config
+      - ./frigate/config.yml:/config/config.yml:ro
+      - ./frigate/models:/models:ro
+    tmpfs:
+      - /tmp/cache:size=100000000
+      - /media/frigate:size=50000000
+    networks: [ebo]
+    logging: *bounded-logging
+
+networks:
+  ebo:
+    name: ebo-qwen-network

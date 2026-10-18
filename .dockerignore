@@ -1,0 +1,15 @@
+# 密钥通过 env_file 在运行时注入，绝不能打进镜像
+.env
+.env.local
+data/
+logs/
+engine/
+frigate/
+scripts/
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.md
+*.bat
+*.sh

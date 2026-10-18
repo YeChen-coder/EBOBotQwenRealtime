@@ -1,0 +1,70 @@
+# Base image pinned HERE (build.yaml is deprecated — the Supervisor wants build parameters in the
+# Dockerfile). It MUST stay a Debian/glibc Python: the Agora SDK ships glibc .so files and does not
+# run on the Alpine/musl base images. Do NOT switch this to an HA alpine base.
+FROM docker.io/library/python:3.11-slim
+
+# The Supervisor still passes --build-arg BUILD_FROM/BUILD_ARCH/BUILD_VERSION; declare them so the
+# build doesn't warn about unused args. They are intentionally NOT used for the base image.
+ARG BUILD_FROM
+ARG BUILD_ARCH
+ARG BUILD_VERSION
+
+LABEL org.opencontainers.image.title="EBO for Home Assistant (unofficial)" \
+      org.opencontainers.image.source="https://github.com/Playcolors-co/ha-enabot" \
+      org.opencontainers.image.description="Unofficial community add-on for Enabot EBO robots"
+
+# Required tools: jq + curl are used by run.sh (options + Supervisor MQTT). ca-certificates
+# for TLS. Keep this step minimal so an update rebuild rarely fails here.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends jq curl ca-certificates procps mosquitto \
+    && rm -rf /var/lib/apt/lists/*
+
+# Core Python deps (required). Retry so a flaky network doesn't break the build.
+# The Agora SDK version is pinned so control is reproducible; bump it to test the video path.
+ARG AGORA_SDK_VERSION=2.4.9
+RUN pip install --no-cache-dir --retries 5 --timeout 60 \
+        "agora-python-server-sdk==${AGORA_SDK_VERSION}" paho-mqtt cryptography segno \
+        "websockets==17.1"
+
+# MCP server for AI agents (optional, opt-in at runtime): non-fatal — if this can't be installed the
+# add-on still works, the MCP option just logs that it's unavailable.
+RUN pip install --no-cache-dir --retries 3 --timeout 60 "fastmcp>=2.0" httpx \
+    || echo "WARN: fastmcp not installed — the MCP server option will be unavailable"
+
+# --- video-only extras (optional): a failure here must NOT break the add-on update ---
+# ffmpeg (republish the stream). If it can't be installed, video just won't work.
+RUN (apt-get update \
+        && apt-get install -y --no-install-recommends ffmpeg \
+        && rm -rf /var/lib/apt/lists/*) \
+    || echo "WARN: ffmpeg not installed — video will be unavailable"
+
+# mediamtx (RTSP server). Downloaded from GitHub; make it non-fatal so a GitHub
+# outage/rate-limit can't fail the whole image rebuild (video is off by default anyway).
+ARG MEDIAMTX_VERSION=1.9.3
+RUN curl -fsSL --retry 5 --retry-delay 3 \
+      "https://github.com/bluenviron/mediamtx/releases/download/v${MEDIAMTX_VERSION}/mediamtx_v${MEDIAMTX_VERSION}_linux_amd64.tar.gz" \
+      | tar xz -C /usr/local/bin mediamtx \
+    || echo "WARN: mediamtx download failed — video will be unavailable"
+
+# hls.js: the panel plays the Low-Latency HLS in a <video> (served same-origin through Ingress, so
+# no nested-iframe CSP issue). Non-fatal: if it's missing the panel falls back to snapshots.
+ARG HLSJS_VERSION=1.5.15
+RUN mkdir -p /app && curl -fsSL --retry 5 --retry-delay 3 \
+      "https://cdn.jsdelivr.net/npm/hls.js@${HLSJS_VERSION}/dist/hls.min.js" -o /app/hls.min.js \
+    || echo "WARN: hls.js download failed — panel drive video falls back to snapshots"
+
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.11/site-packages/agora/agora_sdk
+WORKDIR /app
+# The version changes every release, so this COPY layer is never stale-cached: the running
+# image always contains the current code. VERSION.txt is DERIVED from config.yaml at build so
+# it can never drift out of sync with the released version (a manual bump was easy to forget,
+# causing a false "stale image" warning). run.sh logs it to prove which version is live.
+COPY config.yaml ebo_bridge.py ebo_cloud.py ebo_sign.py ebo_video.py ebo_log.py pcm_talk.py audio_health.py panel.py ebo_mcp.py log_tee.py run.sh /app/
+# Bundle the companion integration so run.sh can install it into /homeassistant/custom_components.
+COPY ha_integration /app/ha_integration
+RUN sed -n 's/^version:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' /app/config.yaml > /app/VERSION.txt \
+    && echo "baked VERSION.txt=$(cat /app/VERSION.txt)" \
+    && sed -i 's/\r$//' /app/run.sh \
+    && chmod +x /app/run.sh
+
+CMD ["python", "-u", "/app/log_tee.py"]
