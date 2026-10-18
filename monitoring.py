@@ -256,6 +256,8 @@ function render(h) {
                   ['机器人状态', h.robot_state_error]].filter(([, v]) => v);
   const wakeState = !h.voice_wake_enabled ? tag('关闭','idle') : h.voice_wake_transcribing ? tag('识别中','info')
                     : h.voice_wake_listening ? tag('监听中','ok') : tag('未监听','idle');
+  const quietLeft = h.quiet_until ? Math.ceil((h.quiet_until - Date.now() / 1000) / 60) : 0;
+  const quietTag = quietLeft > 0 ? tag(`安静中，还剩 ${quietLeft} 分钟（只认唤醒词）`, 'warn') : null;
   const tracking = h.tracking_enabled
       ? ({following:tag('跟随中','info'), centered:tag('已对准','ok'), too_close:tag('太近，停住','warn'), paused:tag('暂停','idle'),
           waiting:tag('没看到人，原地等','idle'), searching:tag('转圈找人','warn'), returning_to_dock:tag('回充电座','info'), resting:tag('休息中（让它去充电了）','info'), leaving_dock:tag('驶离充电座','info')}[h.tracking_status] || tag('等待看到人','idle'))
@@ -272,7 +274,7 @@ function render(h) {
       ['会话状态', esc(label)], ['当前用户', esc(h.active_user || '—')], ['触发方式', esc(h.session_trigger || '—')],
       ['本次会话时长', h.realtime_session_age_seconds == null ? '—' : Math.round(h.realtime_session_age_seconds) + ' 秒'],
       ['用户正在说话', h.input_speech_active ? tag('是','info') : '否'], ['联网搜索', h.web_search_enabled ? '开' : '关']]),
-    card('待机唤醒', wakeState, [
+    card('待机唤醒', quietTag || wakeState, [
       ['唤醒方式', esc((h.wake_words ? '说“' + h.wake_words.split(',').join('”/“') + '”马上醒' : '')
           + (h.addressee_check ? (h.wake_words ? '；' : '') + '其他话由 AI 判断是不是在跟它说' : (h.wake_words ? '' : '任何中文语句')))], ['候选语句', h.voice_wake_candidates],
       ['唤醒成功', h.voice_wake_accepted], ['被拒绝', h.voice_wake_rejected], ['上次唤醒', ago(h.last_voice_wake_at)]]),

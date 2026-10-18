@@ -37,6 +37,15 @@ DOCK_PROMPT = """你在给家里的陪伴机器人做判断。机器人叫“{na
 只回答 yes 或 no。"""
 
 
+QUIET_HINT = re.compile(r'闭嘴|别说了|不要说了|别说话|别讲了|不需要你|不用你|安静|别吵|别烦|走开|少说|不想听')
+
+QUIET_PROMPT = """你在给家里的陪伴机器人做判断。机器人叫“{names}”（这是它的名字）。
+判断这句话是不是在让机器人别说话、安静下来、别打扰。
+例如“你闭嘴”“别说了”“你别说了，烦死了”“不需要你”“安静点”“别吵了”“走开，别烦我”“{name}你别说话了” -> yes；
+“别说了，太好笑了”“我闭嘴就是了”“他让我别说了”“这个不需要你帮忙查了，我自己看”“你安静地陪着我就行”“不用你提醒，我记得” -> no。
+只回答 yes 或 no。"""
+
+
 class AddresseeClassifier:
     def __init__(self, api_key: str, region: str, model: str, names: tuple[str, ...], timeout: float = 5):
         self.api_key = api_key
@@ -44,6 +53,8 @@ class AddresseeClassifier:
         self.model = model
         self.timeout = timeout
         self.system = PROMPT.format(names='”或“'.join(names) if names else '猫猫')
+        self.quiet_system = QUIET_PROMPT.format(names='”或“'.join(names) if names else '猫猫',
+                                                name=names[-1] if names else '猫猫')
         self.dock_system = DOCK_PROMPT.format(names='”或“'.join(names) if names else '猫猫',
                                               name=names[-1] if names else '猫猫')
 
@@ -78,9 +89,17 @@ class AddresseeClassifier:
         lines.append(f'这句话：{text}')
         return self._ask_yes_no(self.system, '\n'.join(lines), 'addressee')
 
+    def wants_quiet(self, text: str) -> bool | None:
+        """是不是在让机器人闭嘴/安静。只对含提示词的话调用（见 may_be_quiet_request）。"""
+        return self._ask_yes_no(self.quiet_system, f'这句话：{text}', 'quiet-request')
+
     def wants_to_dock(self, text: str) -> bool | None:
         """是不是在让机器人回充电座。只对含提示词的话调用（见 may_be_dock_request）。"""
         return self._ask_yes_no(self.dock_system, f'这句话：{text}', 'dock-request')
+
+
+def may_be_quiet_request(text: str) -> bool:
+    return bool(QUIET_HINT.search(text))
 
 
 def may_be_dock_request(text: str) -> bool:

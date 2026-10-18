@@ -48,8 +48,16 @@ class Supervisor:
         self.enabled = True
         self.wake = StandbyVoice(config, state, self.voice_eligible, self.accept_voice)
         self.tracker = None  # main() 在启用视觉跟随时设置
+        self.wake.on_quiet_request = self.handle_quiet_request
 
         state.update(assistant_enabled=self.enabled)
+
+    def handle_quiet_request(self):
+        """用户让它闭嘴：结束当前对话；一段时间内只有唤醒词能叫醒它（仍然本地听写，但不发任何请求）。"""
+        self.wake.quiet(self.config.quiet_seconds)
+        with self.lock:
+            if self.active:
+                self.active.request_abort()
 
     def handle_dock_request(self):
         """用户说让它回去充电：回充电座，并在一段时间内不追人（否则一看到人又开出来）。"""
@@ -102,6 +110,8 @@ class Supervisor:
             conversation.addressee = self.wake.addressee
             conversation.wake_words = self.wake.wake_words
             conversation.on_dock_request = self.handle_dock_request
+            conversation.on_quiet_request = self.handle_quiet_request
+            conversation.local_transcribe = self.wake.transcriber.transcribe
 
             # 唤醒句转录期间用户可能还在说：排队的后续语句和正在说的半句
             # 都交给会话，放在实时音频之前送达，不能被 wake.reset() 丢掉。

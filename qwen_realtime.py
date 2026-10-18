@@ -88,6 +88,7 @@ class QwenRealtimeClient:
         self.on_transcript_delta: Callable[[str], None] | None = None
         self.on_transcript_done: Callable[[str, str], None] | None = None
         self.on_user_transcript: Callable[[str, str], None] | None = None
+        self.on_committed: Callable[[str], None] | None = None
         self.on_speech_started: Callable[[], None] | None = None
         self.on_speech_stopped: Callable[[], None] | None = None
         self.on_error: Callable[[dict], None] | None = None
@@ -193,6 +194,9 @@ class QwenRealtimeClient:
                 self._handle_transcript_delta(event)
             elif event_type == EventType.RESPONSE_AUDIO_TRANSCRIPT_DONE:
                 self._handle_transcript_done(event)
+            elif event_type == EventType.INPUT_AUDIO_BUFFER_COMMITTED:
+                if self.on_committed:
+                    self.on_committed(event.get('item_id', ''))
             elif event_type == EventType.CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_COMPLETED:
                 self._handle_user_transcript(event)
             elif event_type == EventType.CONVERSATION_ITEM_INPUT_AUDIO_TRANSCRIPTION_FAILED:

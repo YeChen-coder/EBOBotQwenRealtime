@@ -15,12 +15,12 @@ from audio_utils import EndOfTurnDetector, resample_24k_to_16k
 from config import Config, Profile
 from qwen_realtime import QwenRealtimeClient, QwenConfig
 from ebo_transport import Speaker, TranscriptStore, AssistantOutputStore
-from addressee import may_be_dock_request
+from addressee import may_be_dock_request, may_be_quiet_request
 from standby_voice import has_wake_word, valid_wake_text
 from state import RuntimeState
 
 # 等服务端转出这一轮说了什么；超时就照常回复，不能因为转录慢把真人的话吞掉
-TRANSCRIPT_WAIT_SECONDS = 6
+TRANSCRIPT_WAIT_SECONDS = 3  # 服务端转录超过这个时间就改用本地 Whisper
 DOCK_INSTRUCTION = ('\n你有自己的充电座。如果有人让你回去充电、回充电座或回去休息，你会自动回去，'
                     '只要简短答应一句（比如“好的，我去充电啦”），不要说自己做不到。')
 
@@ -70,7 +70,10 @@ class Conversation:
             silence_frames=max(10, config.vad_silence_duration_ms // 20))
         self.uncommitted_audio = False
         self.preroll: deque[bytes] = deque(maxlen=3)
-        self.transcript_results: asyncio.Queue[str] = asyncio.Queue()
+        self.transcript_results: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+        self.turn_audio = bytearray()       # 本轮已送给模型的 24 kHz 音频，转录迟到时本地转写用
+        self.committed_item: str | None = None
+        self.local_transcribe = None        # 由 Supervisor 注入（StandbyVoice 的本地 Whisper）
         self.awaiting_transcript = False
         # 由 Supervisor 注入（StandbyVoice 里同一个判断器）；None 表示不判断，有话就回
         self.addressee = None
@@ -79,6 +82,7 @@ class Conversation:
         self.last_assistant_text = ''
         # 由 Supervisor 注入：用户让它回去充电时调用（发回充命令、暂停视觉跟随）
         self.on_dock_request = None
+        self.on_quiet_request = None   # 由 Supervisor 注入：用户让它闭嘴时调用
         self.heard: deque[tuple[float, str]] = deque(maxlen=4)
 
         self.current_response_id = ''
@@ -142,6 +146,7 @@ class Conversation:
         self.qwen.on_transcript_delta = self._handle_transcript_delta
         self.qwen.on_transcript_done = self._handle_transcript_done
         self.qwen.on_user_transcript = self._handle_user_transcript
+        self.qwen.on_committed = self._handle_committed
         self.qwen.on_response_created = self._handle_response_created
         self.qwen.on_response_done = self._handle_response_done
         self.qwen.on_error = self._handle_error
@@ -171,6 +176,7 @@ class Conversation:
                 user_id=self.profile.id,
             )
         await self.qwen.send_audio(resample_24k_to_16k(turn.pcm))
+        self.turn_audio.extend(turn.pcm)
         self.uncommitted_audio = True
         # 唤醒句本身已是完整语音；后续静音达到阈值即提交，期间的追加话语一并进入本轮
         self.turn_detector.mark_speech()
@@ -227,7 +233,10 @@ class Conversation:
             if voiced or self.turn_detector.has_speech or self.uncommitted_audio:
                 # 语音起始前的 300 ms 一并送出，避免截掉第一个字
                 while self.preroll:
-                    await self.qwen.send_audio(resample_24k_to_16k(self.preroll.popleft()))
+                    chunk = self.preroll.popleft()
+                    self.turn_audio.extend(chunk)
+                    await self.qwen.send_audio(resample_24k_to_16k(chunk))
+                self.turn_audio.extend(pcm)
                 await self.qwen.send_audio(resample_24k_to_16k(pcm))
                 self.uncommitted_audio = True
             else:
@@ -246,21 +255,41 @@ class Conversation:
         LOG.info('User turn ended; committing audio')
         self.uncommitted_audio = False
         self.turn_detector.reset()
+        turn_pcm = bytes(self.turn_audio)
+        self.turn_audio.clear()
+        self.committed_item = None
         while not self.transcript_results.empty():
             self.transcript_results.get_nowait()
         self.awaiting_transcript = True
         await self.qwen.commit_audio_buffer()
-        asyncio.create_task(self._respond_if_speech())
+        asyncio.create_task(self._respond_if_speech(turn_pcm))
 
-    async def _respond_if_speech(self):
+    async def _turn_transcript(self, turn_pcm: bytes) -> str:
+        """这一轮说了什么。服务端转录迟到时用本地 Whisper：实测电视噪声的转录常常 6 秒以上才回来
+        而且是空的，以前超时就“照常回复”，模型只能反复说“我在听”。"""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + TRANSCRIPT_WAIT_SECONDS
+        while (remaining := deadline - loop.time()) > 0:
+            try:
+                item_id, text = await asyncio.wait_for(self.transcript_results.get(), remaining)
+            except asyncio.TimeoutError:
+                break
+            if self.committed_item and item_id and item_id != self.committed_item:
+                LOG.info('Dropped late transcript of an earlier turn: %r', text)
+                continue
+            return text
+        if self.local_transcribe is None:
+            LOG.warning('No transcript within %ss and no local transcriber; ignoring turn', TRANSCRIPT_WAIT_SECONDS)
+            return ''
+        text = await asyncio.to_thread(self.local_transcribe, turn_pcm)
+        LOG.info('Server transcript late; local Whisper heard: %r', text)
+        return text
+
+    async def _respond_if_speech(self, turn_pcm: bytes):
         """只有这一轮真的有人说话才回复：噪声/电视声被切成一轮时转录为空，回复会变成反复道歉。"""
         try:
-            try:
-                text = await asyncio.wait_for(self.transcript_results.get(), TRANSCRIPT_WAIT_SECONDS)
-            except asyncio.TimeoutError:
-                LOG.warning('Transcript not ready after %ss; replying anyway', TRANSCRIPT_WAIT_SECONDS)
-                text = None
-            if text is not None and not valid_wake_text(text):
+            text = await self._turn_transcript(turn_pcm)
+            if not valid_wake_text(text):
                 LOG.info('Ignored turn without real speech: %r', text)
                 self.state.increment('input_turns_ignored')
                 return
@@ -275,6 +304,12 @@ class Conversation:
                 if addressed is False:
                     LOG.info('Ignored turn not addressed to the robot: %r', text)
                     self.state.increment('input_turns_ignored')
+                    return
+            if text and self.addressee is not None and self.on_quiet_request and may_be_quiet_request(text):
+                if await asyncio.to_thread(self.addressee.wants_quiet, text):
+                    # 不回答，直接结束对话；之后一段时间只认唤醒词
+                    LOG.info('Asked to be quiet: %r', text)
+                    await asyncio.to_thread(self.on_quiet_request)
                     return
             if text and self.addressee is not None and self.on_dock_request and may_be_dock_request(text):
                 if await asyncio.to_thread(self.addressee.wants_to_dock, text):
@@ -340,10 +375,13 @@ class Conversation:
             )
         self.current_transcript_buffer = ''
 
+    def _handle_committed(self, item_id: str):
+        self.committed_item = item_id or None
+
     def _handle_user_transcript(self, item_id: str, transcript: str):
         """处理用户语音转录（需服务端开启 input_audio_transcription）"""
         LOG.info('User said: %s', transcript)
-        self.transcript_results.put_nowait(transcript)
+        self.transcript_results.put_nowait((item_id, transcript))
         if transcript.strip():
             self.heard.append((time.monotonic(), transcript.strip()))
         if transcript.strip():

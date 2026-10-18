@@ -84,6 +84,7 @@ class Config:
     # 视觉跟随
     tracking_enabled: bool = False
     dock_rest_seconds: float = 600  # 用户说让它回去充电后，这么久不追人
+    quiet_seconds: float = 900      # 用户让它闭嘴后，这么久只认唤醒词
     tracking_dock_after_seconds: float = 300  # 跟随离开充电座后，这么久没看到人就回充（走远了先找一圈）
 
     # 机器人始终放在地上：发现桌面模式开着就自动关掉
@@ -191,6 +192,7 @@ class Config:
             'tracking_enabled': 'EBO_TRACKING_ENABLED',
             'tracking_dock_after_seconds': 'EBO_TRACKING_DOCK_AFTER_SECONDS',
             'dock_rest_seconds': 'EBO_DOCK_REST_SECONDS',
+            'quiet_seconds': 'EBO_QUIET_SECONDS',
             'floor_mode': 'EBO_FLOOR_MODE',
             'vad_threshold': 'REALTIME_VAD_THRESHOLD',
             'vad_prefix_padding_ms': 'EBO_VAD_PREFIX_PADDING_MS',

@@ -11,7 +11,7 @@ import uuid
 
 import webrtcvad
 
-from addressee import AddresseeClassifier
+from addressee import AddresseeClassifier, may_be_quiet_request
 from audio_utils import FRAME_BYTES_24K, is_speech_24k, pcm16k_to_float, resample_24k_to_16k
 
 LOG = logging.getLogger('ebo-standby-voice')
@@ -20,6 +20,7 @@ LOG = logging.getLogger('ebo-standby-voice')
 HALLUCINATIONS = ('字幕', '订阅', '点赞', '打赏', '转发', 'Amara', '谢谢观看', '感谢观看', '请不吝')
 
 RECENT_CONTEXT_SECONDS = 60
+REPEATED = re.compile(r'(.{1,10}?)\1{2,}')
 
 FILLER_WORDS = {'嗯嗯', '啊啊', '哦哦', '呃呃', '喵喵', '哈哈', '呵呵'}
 
@@ -48,6 +49,9 @@ def actionable_transcript(transcript: str) -> bool:
 def valid_wake_text(text: str, wake_words: tuple[str, ...] = ()) -> bool:
     compact = ''.join(re.findall(r'[\w一-鿿]', text or '')).lower()
     if len(compact) < 2 or compact in FILLER_WORDS or not actionable_transcript(text):
+        return False
+    # Whisper 典型幻觉：同一短语重复好几遍（实测“做一件事做一件事做一件事”把机器人唤醒了）
+    if REPEATED.fullmatch(compact):
         return False
     return not wake_words or has_wake_word(text, wake_words)
 
@@ -158,6 +162,8 @@ class StandbyVoice:
                                               self.wake_words) if config.addressee_check else None)
         # 最近听到的话：电视对白是连续的，连起来看更容易认出来
         self.heard: deque[tuple[float, str]] = deque(maxlen=4)
+        self.quiet_until = 0.0
+        self.on_quiet_request = None  # 由 Supervisor 设置
         state.update(voice_wake_enabled=config.voice_wake_enabled)
 
     def reset(self):
@@ -211,12 +217,37 @@ class StandbyVoice:
         cutoff = time.monotonic() - RECENT_CONTEXT_SECONDS
         return tuple(text for at, text in self.heard if at >= cutoff)
 
+    def quiet(self, seconds: float):
+        """用户让它闭嘴：这段时间只认唤醒词，其他话照常本地听写但不唤醒、不调用任何模型。"""
+        self.quiet_until = time.monotonic() + seconds
+        self.state.update(quiet_until=time.time() + seconds)
+        LOG.info('Quiet mode for %.0f min: only wake words wake the robot', seconds / 60)
+
+    def quiet_active(self) -> bool:
+        return time.monotonic() < self.quiet_until
+
+    def end_quiet(self, reason: str):
+        if self.quiet_until:
+            self.quiet_until = 0.0
+            self.state.update(quiet_until=0)
+            LOG.info('Quiet mode ended: %s', reason)
+
     def should_wake(self, text: str) -> bool:
         if not valid_wake_text(text):
             return False
         recent = self.recent_heard()
         self.heard.append((time.monotonic(), text))
-        if self.wake_words and has_wake_word(text, self.wake_words):
+        wake_word = bool(self.wake_words) and has_wake_word(text, self.wake_words)
+        if self.quiet_active() and not wake_word:
+            return False
+        # 待机时直接说“闭嘴”：不唤醒，进入安静（含唤醒词的“猫猫闭嘴”同理）
+        if (self.addressee is not None and self.on_quiet_request and may_be_quiet_request(text)
+                and (wake_word or self.addressee.is_addressed(text, recent=recent) is True)
+                and self.addressee.wants_quiet(text) is True):
+            self.on_quiet_request()
+            return False
+        if wake_word:
+            self.end_quiet('wake word')
             return True
         if self.addressee is not None:
             # 判断失败（网络等）时不唤醒：宁可要求说唤醒词，也不能和电视聊起来
