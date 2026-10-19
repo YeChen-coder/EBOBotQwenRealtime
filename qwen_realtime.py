@@ -387,6 +387,8 @@ class QwenRealtimeClient:
         if not self.ws:
             LOG.warning('Cannot send message: WebSocket not initialized')
             return
+        if self.closed.is_set():
+            return  # 服务端已断开：不再逐条报“发送失败”刷日志
 
         try:
             json_str = json.dumps(message, ensure_ascii=False, separators=(',', ':'))

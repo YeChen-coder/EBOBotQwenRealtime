@@ -20,6 +20,8 @@ from standby_voice import has_wake_word, valid_wake_text
 from state import RuntimeState
 
 # 等服务端转出这一轮说了什么；超时就照常回复，不能因为转录慢把真人的话吞掉
+# 通义千问：一个连接 300 秒没产生回复就断开；我们自己的空闲超时必须更早
+QWEN_IDLE_LIMIT = 300
 TRANSCRIPT_WAIT_SECONDS = 3  # 服务端转录超过这个时间就改用本地 Whisper
 DOCK_INSTRUCTION = ('\n你有自己的充电座。如果有人让你回去充电、回充电座或回去休息，你会自动回去，'
                     '只要简短答应一句（比如“好的，我去充电啦”），不要说自己做不到。')
@@ -208,8 +210,8 @@ class Conversation:
         if time.time() - self.session_started_at > self.config.session_max_seconds:
             LOG.info('Session exceeded max duration, closing')
             self.stop.set()
-        elif time.monotonic() - self.last_activity > self.config.session_idle_seconds:
-            LOG.info('Session idle for %.0fs, closing', self.config.session_idle_seconds)
+        elif time.monotonic() - self.last_activity > min(self.config.session_idle_seconds, QWEN_IDLE_LIMIT - 30):
+            LOG.info('Session idle for %.0fs, closing', min(self.config.session_idle_seconds, QWEN_IDLE_LIMIT - 30))
             self.stop.set()
 
     async def _process_audio_queue(self):
@@ -404,6 +406,11 @@ class Conversation:
 
     def _handle_error(self, error: dict):
         error_msg = error.get('message', 'Unknown error')
+        if error.get('code') == 'response_idle_timeout':
+            # 服务端“300 秒没有回复就断开”：只是对话空闲结束，不是故障
+            LOG.info('Qwen closed the idle session: %s', error_msg)
+            self.response_active = False
+            return
         LOG.error('Qwen API error: %s', error_msg)
         self.state.update(last_error=f'qwen_api_error:{error_msg}')
         # 出错的请求不会有 response.done，避免一直卡在“回复中”而丢弃麦克风音频
