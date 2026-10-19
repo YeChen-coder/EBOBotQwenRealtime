@@ -114,3 +114,14 @@ No more blind reply on timeout: if Qwen’s transcript isn’t back within 3 sec
 Transcripts are matched by turn ID: late ones are discarded, never applied to another turn.
 Repeated-phrase hallucinations are filtered: text like "做一件事做一件事做一件事" no longer wakes it. Ordinary repetition like "你好你好" is unaffected.
 
+---
+
+反正就是又出问题了，看这张图吧。这张图确实有点糊，因为当时环境太黑了。
+
+右下角那个白色的东西是充电桩。但充电桩现在处于背过身的状态，导致它发的信号小机器这边根本收不到，直接让小机器人在原地完美转了好几圈。尝试了很多次，它都没办法自己回到充电桩上。
+
+这种硬件设计的问题，我真不觉得是我在软件这边能解决的，我现在很懵
+
+<img width="1705" height="858" alt="image" src="https://github.com/user-attachments/assets/a2f65124-3300-409e-8bae-0537e4e25715" />
+
+
