@@ -326,7 +326,9 @@ def make_http_handler(store: AudioStore, state: RuntimeState,
 
     class Handler(BaseHTTPRequestHandler):
         def send_json(self, status: int, payload):
-            raw = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+            # numpy 数字等非标准类型也要能输出，不能让一个字段让整个看板失效
+            raw = json.dumps(payload, ensure_ascii=False,
+                             default=lambda o: o.item() if hasattr(o, 'item') else str(o)).encode('utf-8')
             self.send_response(status)
             self.send_header('Content-Type', 'application/json; charset=utf-8')
             self.send_header('Content-Length', str(len(raw)))

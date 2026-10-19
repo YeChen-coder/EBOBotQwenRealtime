@@ -47,7 +47,8 @@ class ScanDetector:
         scores = out[4 + PERSON]
         found = []
         for i in np.where(scores >= self.min_score)[0]:
-            cx, cy, w, h = out[:4, i] / scale
+            # 转成普通 float：numpy float32 写进看板状态后无法 JSON 序列化（实测让 /health 全部报错）
+            cx, cy, w, h = (float(v) for v in out[:4, i] / scale)
             found.append((float(scores[i]), (cx - w / 2 + dx, cy - h / 2, cx + w / 2 + dx, cy + h / 2)))
         return found
 

@@ -328,7 +328,9 @@ class PersonTracker:
             return None
         width, height = self.frame_size(now)
         score, box = max(people, key=lambda p: (p[1][2] - p[1][0]) * (p[1][3] - p[1][1]))
-        box = (box[0] * width / scan_w, box[1] * height / scan_h, box[2] * width / scan_w, box[3] * height / scan_h)
+        score = float(score)
+        box = tuple(float(v) for v in (box[0] * width / scan_w, box[1] * height / scan_h,
+                                       box[2] * width / scan_w, box[3] * height / scan_h))
         with self.lock:
             self.tracks['scan'] = Detection('scan', box, now)
             self.target = 'scan'
