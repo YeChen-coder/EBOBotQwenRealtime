@@ -11,7 +11,9 @@ import uuid
 
 import webrtcvad
 
-from addressee import AddresseeClassifier, may_be_quiet_request
+import timers
+import wake_match
+from addressee import AddresseeClassifier, may_be_dock_request, may_be_quiet_request
 from audio_utils import FRAME_BYTES_24K, is_speech_24k, pcm16k_to_float, resample_24k_to_16k
 
 LOG = logging.getLogger('ebo-standby-voice')
@@ -57,8 +59,8 @@ def valid_wake_text(text: str, wake_words: tuple[str, ...] = ()) -> bool:
 
 
 def has_wake_word(text: str, wake_words: tuple[str, ...]) -> bool:
-    compact = ''.join(re.findall(r'[\w一-鿿]', text or '')).lower()
-    return any(word in compact for word in wake_words)
+    """按读音容错匹配（“毛毛”“小盆友”也算），见 wake_match.py"""
+    return bool(wake_words) and wake_match.matches(text, wake_words)
 
 
 class SpeechSegmenter:
@@ -163,7 +165,13 @@ class StandbyVoice:
         # 最近听到的话：电视对白是连续的，连起来看更容易认出来
         self.heard: deque[tuple[float, str]] = deque(maxlen=4)
         self.quiet_until = 0.0
+        left = timers.remaining(config.timers_path, 'quiet')
+        if left > 0:
+            self.quiet_until = time.monotonic() + left
+            state.update(quiet_until=time.time() + left)
+            LOG.info('Restored quiet mode after restart: %.0f s left', left)
         self.on_quiet_request = None  # 由 Supervisor 设置
+        self.on_dock_request = None   # 由 Supervisor 设置
         state.update(voice_wake_enabled=config.voice_wake_enabled)
 
     def reset(self):
@@ -221,6 +229,7 @@ class StandbyVoice:
         """用户让它闭嘴：这段时间只认唤醒词，其他话照常本地听写但不唤醒、不调用任何模型。"""
         self.quiet_until = time.monotonic() + seconds
         self.state.update(quiet_until=time.time() + seconds)
+        timers.save(self.config.timers_path, 'quiet', time.time() + seconds)
         LOG.info('Quiet mode for %.0f min: only wake words wake the robot', seconds / 60)
 
     def quiet_active(self) -> bool:
@@ -230,6 +239,7 @@ class StandbyVoice:
         if self.quiet_until:
             self.quiet_until = 0.0
             self.state.update(quiet_until=0)
+            timers.save(self.config.timers_path, 'quiet', 0)
             LOG.info('Quiet mode ended: %s', reason)
 
     def should_wake(self, text: str) -> bool:
@@ -245,6 +255,12 @@ class StandbyVoice:
                 and (wake_word or self.addressee.is_addressed(text, recent=recent) is True)
                 and self.addressee.wants_quiet(text) is True):
             self.on_quiet_request()
+            return False
+        # 待机时直接说“回去充电”：不唤醒，直接回充（实测以前待机只判断要不要唤醒，这句话被当成乱码丢掉）
+        if (self.addressee is not None and self.on_dock_request and may_be_dock_request(text)
+                and self.addressee.wants_to_dock(text) is True):
+            LOG.info('Standby heard a request to go charge: %r', text)
+            self.on_dock_request()
             return False
         if wake_word:
             self.end_quiet('wake word')

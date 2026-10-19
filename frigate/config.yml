@@ -35,6 +35,8 @@ objects:
     person:
       # 默认 0.7：沙发上趴着/坐着/只露半身的人常常到不了（YOLOv9 误认少，可以放宽）
       threshold: 0.6
+      # 640x360 画面里太小的“人”（窗外剪影等）不算；走廊远处真人约 4400 像素
+      min_area: 2500
 
 record:
   enabled: false

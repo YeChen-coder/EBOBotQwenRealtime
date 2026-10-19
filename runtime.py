@@ -50,6 +50,7 @@ class Supervisor:
         self.wake = StandbyVoice(config, state, self.voice_eligible, self.accept_voice)
         self.tracker = None  # main() 在启用视觉跟随时设置
         self.wake.on_quiet_request = self.handle_quiet_request
+        self.wake.on_dock_request = self.handle_dock_request
 
         state.update(assistant_enabled=self.enabled)
 
@@ -59,6 +60,30 @@ class Supervisor:
         with self.lock:
             if self.active:
                 self.active.request_abort()
+
+    def dock_and_rest(self) -> dict:
+        """看板按钮：不在座上充电就回座；不论在不在，都开始冷却（调试频繁重启时防止它又跑出来）。"""
+        # 不能用看板缓存的状态：它 10 秒才刷新一次，机器人刚开出去时还显示“在充电”。现查一次；
+        # 刚动过的话 Engine 上报的 charging 也还没更新，宁可多发一次回充
+        charging = False
+        try:
+            charging = str(self.speaker.ebo.robot_state().get('charging')).lower() == 'true'
+        except Exception as exc:
+            LOG.warning('Cannot read robot state before docking: %s', exc)
+        if self.tracker is not None and time.time() - self.tracker.last_move_wall < 20:
+            charging = False
+        if not charging:
+            try:
+                self.speaker.ebo.command('dock')
+                LOG.info('Dashboard: returning to dock and starting the cooldown')
+            except Exception as exc:
+                LOG.warning('Dock command failed: %s', exc)
+        else:
+            LOG.info('Dashboard: already charging; starting the cooldown only')
+        if self.tracker is not None:
+            self.tracker.rest(self.config.dock_rest_seconds)
+        return {'accepted': True, 'docking': not charging,
+                'rest_seconds': self.config.dock_rest_seconds if self.tracker is not None else 0}
 
     def handle_dock_request(self):
         """用户说让它回去充电：回充电座，并在一段时间内不追人（否则一看到人又开出来）。"""
@@ -445,7 +470,18 @@ def make_http_handler(store: AudioStore, state: RuntimeState,
         def do_POST(self):
             if self.path == '/video/whep':
                 return self.proxy_whep()
-            if self.path not in {'/session/start', '/session/close',
+            if self.path == '/dashboard/end-rest':
+                if self.headers.get('X-EBO-Dashboard') != '1':
+                    return self.send_json(403, {'error': 'dashboard_only'})
+                if supervisor.tracker is None:
+                    return self.send_json(200, {'accepted': False, 'error': 'tracking_disabled'})
+                return self.send_json(200, {'accepted': True, 'was_resting': supervisor.tracker.end_rest()})
+            if self.path == '/dashboard/dock-rest':
+                # 看板本机按钮，不要令牌；要求自定义请求头：别的网页跨站发不出这个头（浏览器会先预检，这里不应答）
+                if self.headers.get('X-EBO-Dashboard') != '1':
+                    return self.send_json(403, {'error': 'dashboard_only'})
+                return self.send_json(202, supervisor.dock_and_rest())
+            if self.path not in {'/session/start', '/session/close', '/robot/dock',
                                  '/assistant/pause', '/assistant/resume'}:
                 return self.send_error(404)
 
@@ -461,6 +497,11 @@ def make_http_handler(store: AudioStore, state: RuntimeState,
                 body = json.loads(self.rfile.read(length))
                 if not isinstance(body, dict):
                     raise ValueError('invalid_body')
+
+                if self.path == '/robot/dock':
+                    # 和语音“回去充电”一样：回充，并让视觉跟随休息，免得看到人又开出来
+                    supervisor.handle_dock_request()
+                    return self.send_json(202, {'accepted': True})
 
                 if self.path in {'/assistant/pause', '/assistant/resume'}:
                     supervisor.set_enabled(self.path.endswith('/resume'))

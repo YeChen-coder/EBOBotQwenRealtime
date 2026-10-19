@@ -16,6 +16,8 @@ import time
 from typing import Callable
 from urllib import request
 
+import timers
+
 LOG = logging.getLogger('ebo-person-tracker')
 
 # 转向用“按角度转”（103001）：以前用摇杆小幅转（力度 20、0.6 秒）基本转不动，
@@ -42,7 +44,10 @@ DETECTION_MAX_AGE = 1.5  # 超过此时长的检测视为过时
 SEARCH_STEP_DEGREES = 30 # 找人时每次原地转的角度（正值右转，实测 45° 约 2 秒转完）
 SEARCH_STEPS = 24        # 24 x 30° = 转两圈
 SEARCH_STEP_WAIT = 3.5   # 转完 + 画面稳定 + Frigate 出检测结果
-DOCK_RETRY_SECONDS = 300 # 发了回充但还没充上电，这么久之后再试一次
+DOCK_RETRY_SECONDS = 300
+# 640x360 画面里小于这个面积的“人”不理（走廊远处真人约 4400 像素，窗外剪影约 1200）
+MIN_PERSON_PIXELS = 2500
+SCAN_CONFIRM_DELAY = 1.0  # 自识别看到人后隔这么久同一方向再看一次，两次都在才算 # 发了回充但还没充上电，这么久之后再试一次
 
 
 @dataclass
@@ -60,6 +65,14 @@ def _contains(outer, inner) -> bool:
     inner_area = (inner[2] - inner[0]) * (inner[3] - inner[1])
     outer_area = (outer[2] - outer[0]) * (outer[3] - outer[1])
     return inner_area > 0 and outer_area > inner_area * 1.5 and ix * iy >= 0.9 * inner_area
+
+
+def _iou(a, b) -> float:
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
 
 
 def person_distance(box, width: float, height: float) -> str:
@@ -107,6 +120,10 @@ class PersonTracker:
         self.dock_requested_at: float | None = None
         self.last_move_wall = 0.0
         self.rest_until = 0.0     # 用户让它回去充电后，这段时间内不追人
+        left = timers.remaining(config.timers_path, 'dock_rest')
+        if left > 0:
+            self.rest_until = time.monotonic() + left
+            LOG.info('Restored dock rest after restart: %.0f s left', left)
         self.off_dock_reported = False
         self.stopping = threading.Event()
         self.client = None
@@ -152,6 +169,8 @@ class PersonTracker:
                 box = tuple(float(v) for v in box)
             except (TypeError, ValueError):
                 return
+            if (box[2] - box[0]) * (box[3] - box[1]) < MIN_PERSON_PIXELS:
+                return  # 太小：实测窗户上的剪影（18x69 像素）被认成人，把回充打断了
             self.tracks[object_id] = Detection(object_id, box, now, bool(event.get('stationary')))
 
     def decide(self, now: float) -> dict | None:
@@ -318,13 +337,26 @@ class PersonTracker:
         self.state.update(tracking_status='returning_to_dock')
         return {'dock': True}
 
-    def _scan_for_person(self, now: float) -> dict | None:
+    def _scan_once(self):
         try:
             people, (scan_w, scan_h) = self.scan()
         except Exception as exc:
             LOG.warning('Search scan failed: %s', exc)
-            return None
+            return [], (1, 1)
+        area_scale = (640 * 360) / (scan_w * scan_h)
+        people = [(s, b) for s, b in people if (b[2] - b[0]) * (b[3] - b[1]) * area_scale >= MIN_PERSON_PIXELS]
+        return people, (scan_w, scan_h)
+
+    def _scan_for_person(self, now: float) -> dict | None:
+        people, (scan_w, scan_h) = self._scan_once()
         if not people:
+            return None
+        # 暗处噪点偶尔会被认成人（实测 0.36 分、画面里根本没人）：同一方向再看一次，两次都在才算
+        time.sleep(SCAN_CONFIRM_DELAY)
+        again, _ = self._scan_once()
+        people = [(s, b) for s, b in people if any(_iou(b, b2) > 0.3 for _, b2 in again)]
+        if not people:
+            LOG.info('Search scan saw a person once but not on the second look; ignoring')
             return None
         width, height = self.frame_size(now)
         score, box = max(people, key=lambda p: (p[1][2] - p[1][0]) * (p[1][3] - p[1][1]))
@@ -345,11 +377,22 @@ class PersonTracker:
         """已经发了回充命令：一段时间内不追人，也不再自己转圈找人/重复回充。"""
         now = time.monotonic()
         self.rest_until = now + seconds
+        timers.save(self.config.timers_path, 'dock_rest', time.time() + seconds)
         self.searching = False
         self.search_steps_left = 0
         self.dock_requested_at = now
         self.state.update(tracking_status='resting', tracking_rest_seconds=round(seconds))
-        LOG.info('Resting on the dock for %.0f min (voice request); not following people', seconds / 60)
+        LOG.info('Resting on the dock for %.0f min; not following people', seconds / 60)
+
+    def end_rest(self) -> bool:
+        """看板“结束冷却”：马上恢复正常跟随（调试时改完要立刻看效果）。返回之前是否在冷却。"""
+        was_resting = time.monotonic() < self.rest_until
+        self.rest_until = 0.0
+        self.dock_requested_at = None
+        timers.save(self.config.timers_path, 'dock_rest', 0)
+        self.state.update(tracking_status='idle', tracking_rest_seconds=0)
+        LOG.info('Cooldown ended from the dashboard; following resumes')
+        return was_resting
 
     def run(self):
         while not self.stopping.wait(0.2):

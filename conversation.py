@@ -5,6 +5,7 @@ commit 音频缓冲并 response.create；机器人说话期间不送麦克风音
 """
 from __future__ import annotations
 import asyncio
+import re
 import logging
 import threading
 import time
@@ -22,7 +23,15 @@ from state import RuntimeState
 # 等服务端转出这一轮说了什么；超时就照常回复，不能因为转录慢把真人的话吞掉
 # 通义千问：一个连接 300 秒没产生回复就断开；我们自己的空闲超时必须更早
 QWEN_IDLE_LIMIT = 300
-TRANSCRIPT_WAIT_SECONDS = 3  # 服务端转录超过这个时间就改用本地 Whisper
+TRANSCRIPT_WAIT_SECONDS = 3
+# 模型自己说“我这就回去 / 我去充电啦 / 马上回充电座”：按单句判断，问句和否定不算
+ASSISTANT_GOING_TO_DOCK = re.compile(r'(我|这就|马上|立刻|立马|乖乖)[^，,]{0,4}(回去|去充电|回充电座|回窝)')
+ASSISTANT_NOT_GOING = re.compile(r'(不|别|没)[^，,]{0,2}(回去|去充电|回窝)|等会|待会|晚点|过会|一会儿再|[吗呢？?]')
+
+
+def says_going_to_dock(reply: str) -> bool:
+    return any(ASSISTANT_GOING_TO_DOCK.search(sentence) and not ASSISTANT_NOT_GOING.search(sentence)
+               for sentence in re.split(r'(?<=[。！？!?.])', reply))  # 服务端转录超过这个时间就改用本地 Whisper
 DOCK_INSTRUCTION = ('\n你有自己的充电座。如果有人让你回去充电、回充电座或回去休息，你会自动回去，'
                     '只要简短答应一句（比如“好的，我去充电啦”），不要说自己做不到。')
 
@@ -85,6 +94,7 @@ class Conversation:
         # 由 Supervisor 注入：用户让它回去充电时调用（发回充命令、暂停视觉跟随）
         self.on_dock_request = None
         self.on_quiet_request = None   # 由 Supervisor 注入：用户让它闭嘴时调用
+        self.last_dock_request = -1e9
         self.heard: deque[tuple[float, str]] = deque(maxlen=4)
 
         self.current_response_id = ''
@@ -314,8 +324,9 @@ class Conversation:
                     await asyncio.to_thread(self.on_quiet_request)
                     return
             if text and self.addressee is not None and self.on_dock_request and may_be_dock_request(text):
-                if await asyncio.to_thread(self.addressee.wants_to_dock, text):
+                if await asyncio.to_thread(self.addressee.wants_to_dock, text, self.last_assistant_text):
                     LOG.info('Voice request to go charge: %r', text)
+                    self.last_dock_request = time.monotonic()
                     await asyncio.to_thread(self.on_dock_request)
             if self.stop.is_set() or self.response_active or not self.qwen:
                 return
@@ -367,6 +378,12 @@ class Conversation:
         LOG.info('Assistant said: %s', transcript[:100])
         if transcript:
             self.last_assistant_text = transcript[-200:]
+            # 说到做到：模型答应了“我这就回去（充电）”，就真的回充（实测用户说“回去吧”时它答应了却没动）
+            if (self.on_dock_request and says_going_to_dock(transcript)
+                    and time.monotonic() - self.last_dock_request > 60):
+                LOG.info('Assistant said it is going to charge; docking: %r', transcript[:60])
+                self.last_dock_request = time.monotonic()
+                self.loop.run_in_executor(None, self.on_dock_request)
         if transcript:
             self.outputs.append(
                 output_id=self.current_response_id,

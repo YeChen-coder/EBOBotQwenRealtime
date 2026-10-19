@@ -179,62 +179,78 @@ select,label{font:inherit;color:inherit}
 select{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:1px 4px}
 .empty{color:var(--muted);font-size:13px}
 .errors .row span:last-child{color:var(--bad)}
+#lang{font-weight:600}
 </style>
 </head>
 <body>
 <header>
-  <h1>EBO 助手看板</h1>
-  <span id="overall" class="badge idle">连接中…</span>
+  <h1 data-en="EBO Assistant Dashboard">EBO 助手看板</h1>
+  <span id="overall" class="badge idle">…</span>
   <span id="session" class="badge idle">—</span>
   <span class="meta" id="meta"></span>
-  <a class="meta" href="http://127.0.0.1:8101/" target="_blank" rel="noopener" style="margin-left:auto">机器人控制面板 ↗</a>
+  <span style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <span class="meta" id="dockmsg"></span>
+    <button id="dockrest" type="button" data-en="Dock &amp; cool down"
+      title="不在充电座就回去；已在充电就只开始冷却。冷却期间看到人也不追，重启程序也不会丢"
+      data-en-title="Returns to the dock if it isn't charging; if it already is, just starts the cooldown. It won't follow people during the cooldown, and a restart keeps it.">回充电座并冷却</button>
+    <button id="endrest" type="button" data-en="End cooldown"
+      title="马上结束冷却，恢复正常跟随" data-en-title="End the cooldown now and resume normal following">结束冷却</button>
+    <a class="meta" href="http://127.0.0.1:8101/" target="_blank" rel="noopener" data-en="Robot control panel ↗">机器人控制面板 ↗</a>
+    <button id="lang" type="button" title="切换语言 / Switch language">English</button>
+  </span>
 </header>
 <main>
   <div class="top">
-    <section class="card"><h2>实时画面 <span id="vstate" class="badge idle">连接中…</span>
+    <section class="card"><h2><span data-en="Live view">实时画面</span> <span id="vstate" class="badge idle">…</span>
       <span class="tools">
-        <button id="sound" type="button">开声音</button>
-        <label id="boxesl" hidden><input type="checkbox" id="boxes"> 识别框</label>
-        <select id="vmode"><option value="auto">自动</option><option value="webrtc">WebRTC（低延迟+声音）</option><option value="mjpeg">图片流（兼容）</option></select>
-        <button id="vfull" type="button">全屏</button>
+        <button id="sound" type="button"></button>
+        <label id="boxesl" hidden><input type="checkbox" id="boxes"> <span data-en="Detection boxes">识别框</span></label>
+        <select id="vmode"><option value="auto" data-en="Auto">自动</option><option value="webrtc" data-en="WebRTC (low latency + audio)">WebRTC（低延迟+声音）</option><option value="mjpeg" data-en="Image stream (compatible)">图片流（兼容）</option></select>
+        <button id="vfull" type="button" data-en="Fullscreen">全屏</button>
       </span></h2>
       <div class="screen" id="screen">
         <video id="vid" autoplay muted playsinline></video>
-        <img id="mjpg" alt="实时画面" hidden>
-        <div class="vmsg" id="vmsg">正在连接机器人摄像头…</div>
+        <img id="mjpg" alt="" hidden>
+        <div class="vmsg" id="vmsg"></div>
       </div>
     </section>
-    <section class="card"><h2>最近对话</h2><div class="chat" id="chat"><div class="empty">还没有对话</div></div></section>
+    <section class="card"><h2 data-en="Recent conversation">最近对话</h2><div class="chat" id="chat"></div></section>
   </div>
   <div class="grid" id="cards"></div>
-  <section class="card" style="margin-top:12px"><h2>日志
-    <span class="tools"><select id="level"><option value="INFO">全部</option><option value="WARNING">警告及以上</option><option value="ERROR">仅错误</option></select>
-    <label><input type="checkbox" id="follow" checked> 自动滚动</label></span></h2>
+  <section class="card" style="margin-top:12px"><h2><span data-en="Logs">日志</span>
+    <span class="tools"><select id="level"><option value="INFO" data-en="All">全部</option><option value="WARNING" data-en="Warnings and above">警告及以上</option><option value="ERROR" data-en="Errors only">仅错误</option></select>
+    <label><input type="checkbox" id="follow" checked> <span data-en="Auto-scroll">自动滚动</span></label></span></h2>
     <div class="logs" id="logs"></div></section>
 </main>
 <script>
 const $ = id => document.getElementById(id);
+let lang = 'zh';
+try { lang = localStorage.getItem('ebo-dashboard-lang') === 'en' ? 'en' : 'zh'; } catch (e) {}
+const T = (zh, en) => lang === 'en' ? en : zh;
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const yes = v => v ? '<span class="badge ok">是</span>' : '<span class="badge bad">否</span>';
-const age = s => s == null ? '—' : s < 60 ? `${s.toFixed(1)} 秒前` : s < 3600 ? `${Math.round(s/60)} 分钟前` : `${(s/3600).toFixed(1)} 小时前`;
-const ago = ts => ts ? age(Date.now()/1000 - ts) : '从未';
-const clock = ts => new Date(ts*1000).toLocaleTimeString('zh-CN', {hour12:false});
-const STATE = {standby:['待机','ok'], connecting:['连接中','info'], active:['对话中','info'], paused:['已暂停','warn'], starting:['启动中','idle'], saving_memory:['保存中','info']};
-let lastSeq = 0, logs = [], failures = 0;
-const HINTS = {
-  TimeoutError: '连接超时：这台电脑访问不到 Engine（检查 IP 地址 / 是否同一网络 / VPN）',
-  URLError: '访问不到 Engine 的 HTTP 接口（检查 IP 地址 / 网络）',
-  ConnectionRefusedError: 'Engine 主机可达，但端口没开（Engine 没在运行？）',
-  ConnectionResetError: 'Engine 断开了连接',
-  WebSocketBadStatusException: 'Engine 拒绝了音频连接（检查 EBO_API_TOKEN）',
-  HTTPError: 'Engine 返回错误（检查 EBO_API_TOKEN / 机器人节点名）',
-  ValueError: '数据格式不对（Engine 版本不匹配？）',
-  monitor_error: '读不到 Engine 的音频状态',
-  monitor_stale: 'Engine 音频状态过时',
-  no_source_packets: '机器人没发来音频（可能在休眠）',
-  source_stale: '机器人音频中断',
-};
-const explain = v => { const k = String(v).split(':')[0]; return HINTS[k] ? `${HINTS[k]} <small>(${esc(v)})</small>` : esc(v); };
+const yes = v => v ? `<span class="badge ok">${T('是','Yes')}</span>` : `<span class="badge bad">${T('否','No')}</span>`;
+const dur = s => s < 60 ? T(`${s.toFixed(1)} 秒`, `${s.toFixed(1)} s`) : s < 3600 ? T(`${Math.round(s/60)} 分钟`, `${Math.round(s/60)} min`) : T(`${(s/3600).toFixed(1)} 小时`, `${(s/3600).toFixed(1)} h`);
+const age = s => s == null ? '—' : T(dur(s) + '前', dur(s) + ' ago');
+const ago = ts => ts ? age(Date.now()/1000 - ts) : T('从未', 'never');
+const clock = ts => new Date(ts*1000).toLocaleTimeString(lang === 'en' ? 'en-GB' : 'zh-CN', {hour12:false});
+const mmss = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+const STATE = () => ({standby:[T('待机','Standby'),'ok'], connecting:[T('连接中','Connecting'),'info'], active:[T('对话中','In conversation'),'info'],
+  paused:[T('已暂停','Paused'),'warn'], starting:[T('启动中','Starting'),'idle'], saving_memory:[T('保存中','Saving memory'),'info']});
+let lastSeq = 0, logs = [], failures = 0, lastHealth = null, lastChat = null, dockNote = null, wasResting = false;
+const HINTS = () => ({
+  TimeoutError: T('连接超时：这台电脑访问不到 Engine（检查 IP 地址 / 是否同一网络 / VPN）', 'Connection timed out: this computer cannot reach the Engine (check the IP address / same network / VPN)'),
+  URLError: T('访问不到 Engine 的 HTTP 接口（检查 IP 地址 / 网络）', "Cannot reach the Engine's HTTP API (check the IP address / network)"),
+  ConnectionRefusedError: T('Engine 主机可达，但端口没开（Engine 没在运行？）', 'Engine host is reachable but the port is closed (is the Engine running?)'),
+  ConnectionResetError: T('Engine 断开了连接', 'The Engine closed the connection'),
+  WebSocketBadStatusException: T('Engine 拒绝了音频连接（检查 EBO_API_TOKEN）', 'The Engine rejected the audio connection (check EBO_API_TOKEN)'),
+  HTTPError: T('Engine 返回错误（检查 EBO_API_TOKEN / 机器人节点名）', 'The Engine returned an error (check EBO_API_TOKEN / robot node name)'),
+  ValueError: T('数据格式不对（Engine 版本不匹配？）', 'Unexpected data format (Engine version mismatch?)'),
+  monitor_error: T('读不到 Engine 的音频状态', "Cannot read the Engine's audio status"),
+  monitor_stale: T('Engine 音频状态过时', 'Engine audio status is stale'),
+  no_source_packets: T('机器人没发来音频（可能在休眠）', 'No audio from the robot (it may be asleep)'),
+  source_stale: T('机器人音频中断', 'Robot audio stopped'),
+});
+const explain = v => { const k = String(v).split(':')[0], h = HINTS(); return h[k] ? `${h[k]} <small>(${esc(v)})</small>` : esc(v); };
 
 function card(title, badge, rows) {
   return `<div class="card"><h2>${title}${badge || ''}</h2>${rows.map(([k, v]) => `<div class="row"><span>${k}</span><span>${v}</span></div>`).join('')}</div>`;
@@ -243,65 +259,83 @@ function tag(text, cls) { return `<span class="badge ${cls}">${esc(text)}</span>
 
 function render(h) {
   $('overall').className = 'badge ' + (h.ok ? 'ok' : h.media_starting ? 'warn' : 'bad');
-  $('overall').textContent = h.ok ? '运行正常' : h.media_starting ? '启动中' : '有问题';
-  const [label, cls] = STATE[h.session_state] || [h.session_state, 'idle'];
+  $('overall').textContent = h.ok ? T('运行正常','Running normally') : h.media_starting ? T('启动中','Starting') : T('有问题','Problem');
+  const [label, cls] = STATE()[h.session_state] || [h.session_state, 'idle'];
   $('session').className = 'badge ' + cls; $('session').textContent = label;
-  $('meta').textContent = `已运行 ${Math.floor(h.uptime_seconds/3600)} 小时 ${Math.floor(h.uptime_seconds%3600/60)} 分 · 完成会话 ${h.sessions_completed} 次`;
+  const hrs = Math.floor(h.uptime_seconds/3600), mins = Math.floor(h.uptime_seconds%3600/60);
+  $('meta').textContent = T(`已运行 ${hrs} 小时 ${mins} 分 · 完成会话 ${h.sessions_completed} 次`,
+                            `Up ${hrs} h ${mins} min · ${h.sessions_completed} sessions completed`);
+
+  // 冷却倒计时：跟着看板每 2 秒刷新
+  const resting = h.tracking_status === 'resting' && h.tracking_rest_seconds > 0;
+  if (wasResting && !resting) dockNote = null;   // 冷却自己结束了，旧提示不再显示
+  wasResting = resting;
+  $('dockmsg').textContent = resting ? T(`冷却中，还剩 ${mmss(h.tracking_rest_seconds)}`, `Cooling down, ${mmss(h.tracking_rest_seconds)} left`)
+                                     : dockNote ? dockNote() : '';
 
   const audioOk = h.audio_streaming && h.source_audio_ok;
   const appBusy = ((h.engine_audio_health || {}).other_viewers || 0) > 0;
-  const micTag = appBusy ? tag(audioOk ? '正常（EBO App 在线）' : '被 EBO App 占用', 'warn') : tag(audioOk ? '正常' : '异常', audioOk ? 'ok' : 'bad');
-  const errors = [['助手', h.last_error], ['音频采集', h.audio_capture_error], ['Engine 音频', h.engine_audio_error],
-                  ['唤醒', h.voice_wake_last_error], ['视觉跟随', h.tracking_last_error],
-                  ['机器人状态', h.robot_state_error]].filter(([, v]) => v);
-  const wakeState = !h.voice_wake_enabled ? tag('关闭','idle') : h.voice_wake_transcribing ? tag('识别中','info')
-                    : h.voice_wake_listening ? tag('监听中','ok') : tag('未监听','idle');
+  const micTag = appBusy ? tag(audioOk ? T('正常（EBO App 在线）','OK (EBO App online)') : T('被 EBO App 占用','In use by the EBO App'), 'warn')
+                         : tag(audioOk ? T('正常','OK') : T('异常','Error'), audioOk ? 'ok' : 'bad');
+  const errors = [[T('助手','Assistant'), h.last_error], [T('音频采集','Audio capture'), h.audio_capture_error], [T('Engine 音频','Engine audio'), h.engine_audio_error],
+                  [T('唤醒','Wake'), h.voice_wake_last_error], [T('视觉跟随','Person following'), h.tracking_last_error],
+                  [T('机器人状态','Robot status'), h.robot_state_error]].filter(([, v]) => v);
+  const wakeState = !h.voice_wake_enabled ? tag(T('关闭','Off'),'idle') : h.voice_wake_transcribing ? tag(T('识别中','Transcribing'),'info')
+                    : h.voice_wake_listening ? tag(T('监听中','Listening'),'ok') : tag(T('未监听','Not listening'),'idle');
   const quietLeft = h.quiet_until ? Math.ceil((h.quiet_until - Date.now() / 1000) / 60) : 0;
-  const quietTag = quietLeft > 0 ? tag(`安静中，还剩 ${quietLeft} 分钟（只认唤醒词）`, 'warn') : null;
+  const quietTag = quietLeft > 0 ? tag(T(`安静中，还剩 ${quietLeft} 分钟（只认唤醒词）`, `Quiet, ${quietLeft} min left (wake words only)`), 'warn') : null;
   const tracking = h.tracking_enabled
-      ? ({following:tag('跟随中','info'), centered:tag('已对准','ok'), too_close:tag('太近，停住','warn'), paused:tag('暂停','idle'),
-          waiting:tag('没看到人，原地等','idle'), searching:tag('转圈找人','warn'), returning_to_dock:tag('回充电座','info'), resting:tag('休息中（让它去充电了）','info'), leaving_dock:tag('驶离充电座','info')}[h.tracking_status] || tag('等待看到人','idle'))
-      : tag('未启用','idle');
+      ? ({following:tag(T('跟随中','Following'),'info'), centered:tag(T('已对准','Centered'),'ok'), too_close:tag(T('太近，停住','Too close, holding'),'warn'),
+          paused:tag(T('暂停','Paused'),'idle'), waiting:tag(T('没看到人，原地等','No one seen, waiting'),'idle'), searching:tag(T('转圈找人','Turning to search'),'warn'),
+          returning_to_dock:tag(T('回充电座','Returning to dock'),'info'), resting:tag(T('休息中（让它去充电了）','Resting (sent to charge)'),'info'),
+          leaving_dock:tag(T('驶离充电座','Leaving the dock'),'info')}[h.tracking_status] || tag(T('等待看到人','Waiting to see someone'),'idle'))
+      : tag(T('未启用','Disabled'),'idle');
+  const words = h.wake_words ? h.wake_words.split(',') : [];
+  const wakeHow = (words.length ? T('说“' + words.join('”/“') + '”马上醒', 'Say "' + words.join('" / "') + '" to wake instantly') : '')
+      + (h.addressee_check ? (words.length ? T('；', '; ') : '') + T('其他话由 AI 判断是不是在跟它说', 'AI decides whether other speech is meant for it')
+                           : (words.length ? '' : T('任何中文语句', 'Any Chinese sentence')));
+  const distance = {far:T('远（会靠近）','Far (will approach)'), ok:T('合适','Good'), close:T('太近','Too close')};
 
   $('cards').innerHTML = [
-    card('机器人麦克风', micTag, [
-      ['EBO App', appBusy ? tag('正在用 App 看机器人' + (audioOk ? '' : '，关掉 App 后自动恢复'), 'warn') : '没有'],
-      ['Engine 地址', esc(h.engine_api_url || '—')],
-      ['音频流到达', yes(h.audio_streaming)], ['上次收到音频', age(h.last_audio_age_seconds)],
-      ['Engine 音源状态', explain(h.source_audio_status)], ['传输方式', esc(h.audio_capture_transport || '—')],
-      ['自动唤醒机器人次数', h.media_recovery_attempts]]),
-    card('通义千问', tag(h.realtime_connected ? '已连接' : '未连接', h.realtime_connected ? 'ok' : 'idle'), [
-      ['会话状态', esc(label)], ['当前用户', esc(h.active_user || '—')], ['触发方式', esc(h.session_trigger || '—')],
-      ['本次会话时长', h.realtime_session_age_seconds == null ? '—' : Math.round(h.realtime_session_age_seconds) + ' 秒'],
-      ['用户正在说话', h.input_speech_active ? tag('是','info') : '否'], ['联网搜索', h.web_search_enabled ? '开' : '关']]),
-    card('待机唤醒', quietTag || wakeState, [
-      ['唤醒方式', esc((h.wake_words ? '说“' + h.wake_words.split(',').join('”/“') + '”马上醒' : '')
-          + (h.addressee_check ? (h.wake_words ? '；' : '') + '其他话由 AI 判断是不是在跟它说' : (h.wake_words ? '' : '任何中文语句')))], ['候选语句', h.voice_wake_candidates],
-      ['唤醒成功', h.voice_wake_accepted], ['被拒绝', h.voice_wake_rejected], ['上次唤醒', ago(h.last_voice_wake_at)]]),
-    card('播放 / 回复', tag(h.speaker_stream_status, h.speaker_stream_failures ? 'warn' : 'idle'), [
-      ['已保存回复', h.assistant_outputs_persisted], ['上次回复', ago(h.last_assistant_output_at)],
-      ['用户转录条数', h.user_transcripts_received], ['流式失败', h.speaker_stream_failures], ['改用 URL 播放', h.speaker_stream_fallbacks],
-      ['请求回复次数', h.manual_responses_requested]]),
+    card(T('机器人麦克风','Robot microphone'), micTag, [
+      ['EBO App', appBusy ? tag(T('正在用 App 看机器人','Someone is watching via the App') + (audioOk ? '' : T('，关掉 App 后自动恢复','; recovers when the App closes')), 'warn') : T('没有','None')],
+      [T('Engine 地址','Engine address'), esc(h.engine_api_url || '—')],
+      [T('音频流到达','Audio stream arriving'), yes(h.audio_streaming)], [T('上次收到音频','Last audio received'), age(h.last_audio_age_seconds)],
+      [T('Engine 音源状态','Engine audio source'), explain(h.source_audio_status)], [T('传输方式','Transport'), esc(h.audio_capture_transport || '—')],
+      [T('自动唤醒机器人次数','Robot auto-wake count'), h.media_recovery_attempts]]),
+    card(T('通义千问','Qwen (Tongyi Qianwen)'), tag(h.realtime_connected ? T('已连接','Connected') : T('未连接','Not connected'), h.realtime_connected ? 'ok' : 'idle'), [
+      [T('会话状态','Session state'), esc(label)], [T('当前用户','Current user'), esc(h.active_user || '—')], [T('触发方式','Trigger'), esc(h.session_trigger || '—')],
+      [T('本次会话时长','Session length'), h.realtime_session_age_seconds == null ? '—' : Math.round(h.realtime_session_age_seconds) + T(' 秒',' s')],
+      [T('用户正在说话','User speaking'), h.input_speech_active ? tag(T('是','Yes'),'info') : T('否','No')], [T('联网搜索','Web search'), h.web_search_enabled ? T('开','On') : T('关','Off')]]),
+    card(T('待机唤醒','Standby wake'), quietTag || wakeState, [
+      [T('唤醒方式','How to wake'), esc(wakeHow)], [T('候选语句','Candidate phrases'), h.voice_wake_candidates],
+      [T('唤醒成功','Woken'), h.voice_wake_accepted], [T('被拒绝','Rejected'), h.voice_wake_rejected], [T('上次唤醒','Last wake'), ago(h.last_voice_wake_at)]]),
+    card(T('播放 / 回复','Playback / replies'), tag(h.speaker_stream_status, h.speaker_stream_failures ? 'warn' : 'idle'), [
+      [T('已保存回复','Replies saved'), h.assistant_outputs_persisted], [T('上次回复','Last reply'), ago(h.last_assistant_output_at)],
+      [T('用户转录条数','User transcripts'), h.user_transcripts_received], [T('流式失败','Stream failures'), h.speaker_stream_failures],
+      [T('改用 URL 播放','URL playback fallbacks'), h.speaker_stream_fallbacks], [T('请求回复次数','Responses requested'), h.manual_responses_requested]]),
     // 机器人上报的 docked 在离开充电座后很久都不复位，只能按是否在充电判断
-    card('机器人状态', h.robot_charging == null ? tag('未知','idle') : h.robot_charging ? tag('在充电座上充电','info') : tag('不在充电座','ok'), [
-      ['电量', (h.robot_battery ?? '—') + (h.robot_battery != null ? '%' : '')],
-      ['桌面模式', h.robot_desktop_mode == null ? '—' : h.robot_desktop_mode ? tag('开（会自动关闭）','warn') : '关']]),
-    card('视觉跟随', tracking, [
-      ['MQTT', h.tracking_enabled ? yes(h.mqtt_connected) : '—'], ['人相对中心', h.tracking_offset ?? '—'],
-      ['人的远近', h.tracking_distance ? ({far:'远（会靠近）', ok:'合适', close:'太近'}[h.tracking_distance] + '，框高 ' + Math.round(h.tracking_height_ratio * 100) + '%') : '—'],
-      ['多久没看到人', h.tracking_enabled && h.tracking_absent_seconds != null ? age(h.tracking_absent_seconds).replace('前', '') : '—'],
-      ['自动回充', h.tracking_enabled ? `离开充电座后 ${Math.round((h.tracking_dock_after_seconds || 600) / 60)} 分钟没人` : '—']]),
-    `<div class="card errors"><h2>最近错误${errors.length ? tag(errors.length + ' 项','bad') : tag('无','ok')}</h2>${
-      errors.length ? errors.map(([k, v]) => `<div class="row"><span>${k}</span><span>${explain(v)}</span></div>`).join('') : '<div class="empty">一切正常</div>'}</div>`,
+    card(T('机器人状态','Robot status'), h.robot_charging == null ? tag(T('未知','Unknown'),'idle') : h.robot_charging ? tag(T('在充电座上充电','Charging on the dock'),'info') : tag(T('不在充电座','Off the dock'),'ok'), [
+      [T('电量','Battery'), (h.robot_battery ?? '—') + (h.robot_battery != null ? '%' : '')],
+      [T('桌面模式','Desk mode'), h.robot_desktop_mode == null ? '—' : h.robot_desktop_mode ? tag(T('开（会自动关闭）','On (will be turned off)'),'warn') : T('关','Off')]]),
+    card(T('视觉跟随','Person following'), tracking, [
+      ['MQTT', h.tracking_enabled ? yes(h.mqtt_connected) : '—'], [T('人相对中心','Offset from center'), h.tracking_offset ?? '—'],
+      [T('人的远近','Distance'), h.tracking_distance ? (distance[h.tracking_distance] + T('，框高 ',', box height ') + Math.round(h.tracking_height_ratio * 100) + '%') : '—'],
+      [T('多久没看到人','Time since last seen'), h.tracking_enabled && h.tracking_absent_seconds != null ? dur(h.tracking_absent_seconds) : '—'],
+      [T('自动回充','Auto-dock'), h.tracking_enabled ? T(`离开充电座后 ${Math.round((h.tracking_dock_after_seconds || 600) / 60)} 分钟没人`,
+                                                        `After ${Math.round((h.tracking_dock_after_seconds || 600) / 60)} min off the dock with no one around`) : '—'],
+      [T('冷却剩余','Cooldown left'), resting ? T(`${mmss(h.tracking_rest_seconds)}（这段时间不追人）`, `${mmss(h.tracking_rest_seconds)} (won't follow people)`) : '—']]),
+    `<div class="card errors"><h2>${T('最近错误','Recent errors')}${errors.length ? tag(errors.length + T(' 项',''),'bad') : tag(T('无','None'),'ok')}</h2>${
+      errors.length ? errors.map(([k, v]) => `<div class="row"><span>${k}</span><span>${explain(v)}</span></div>`).join('') : `<div class="empty">${T('一切正常','All good')}</div>`}</div>`,
   ].join('');
 }
 
 function renderChat(items) {
   const box = $('chat');
-  if (!items.length) { box.innerHTML = '<div class="empty">还没有对话</div>'; return; }
+  if (!items.length) { box.innerHTML = `<div class="empty">${T('还没有对话','No conversation yet')}</div>`; return; }
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
-  box.innerHTML = items.map(m => `<div class="msg ${m.role}"><small>${m.role === 'user' ? '用户' : '助手'} · ${clock(m.at)}${
-    m.interrupted ? ' · 被打断' : ''}</small>${esc(m.text)}</div>`).join('');
+  box.innerHTML = items.map(m => `<div class="msg ${m.role}"><small>${m.role === 'user' ? T('用户','User') : T('助手','Assistant')} · ${clock(m.at)}${
+    m.interrupted ? T(' · 被打断',' · interrupted') : ''}</small>${esc(m.text)}</div>`).join('');
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
 
@@ -315,27 +349,61 @@ function renderLogs() {
 }
 $('level').onchange = renderLogs;
 
+// 按钮结果提示：存成函数，切换语言后也能重新显示；冷却中时被倒计时盖住
+function note(fn) { dockNote = fn; $('dockmsg').textContent = fn(); }
+$('endrest').onclick = async () => {
+  const btn = $('endrest');
+  btn.disabled = true; note(() => T('发送中…','Sending…'));
+  try {
+    const r = await fetch('/dashboard/end-rest', {method: 'POST', headers: {'X-EBO-Dashboard': '1'}});
+    const j = await r.json();
+    note(() => j.error === 'tracking_disabled' ? T('视觉跟随没开，没有冷却','Person following is off; there is no cooldown')
+      : j.was_resting ? T('冷却已结束，恢复正常跟随','Cooldown ended; normal following resumes') : T('本来就不在冷却中，正常工作','Not cooling down; working normally'));
+    wasResting = false;
+    if (lastHealth) { lastHealth.tracking_status = 'idle'; lastHealth.tracking_rest_seconds = 0; render(lastHealth); }
+  } catch (e) { note(() => T('失败：','Failed: ') + e.message); }
+  setTimeout(() => { btn.disabled = false; }, 2000);
+};
+$('dockrest').onclick = async () => {
+  const btn = $('dockrest');
+  btn.disabled = true; note(() => T('发送中…','Sending…'));
+  try {
+    const r = await fetch('/dashboard/dock-rest', {method: 'POST', headers: {'X-EBO-Dashboard': '1'}});
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.status);
+    const mins = Math.round(j.rest_seconds / 60);
+    note(() => !j.rest_seconds ? T('已发回充命令（视觉跟随没开，不需要冷却）','Dock command sent (person following is off, no cooldown needed)')
+      : j.docking ? T(`正在回充电座，冷却 ${mins} 分钟`, `Returning to the dock; ${mins} min cooldown`)
+                  : T(`已经在充电，开始冷却 ${mins} 分钟`, `Already charging; ${mins} min cooldown started`));
+  } catch (e) { note(() => T('失败：','Failed: ') + e.message); }
+  setTimeout(() => { btn.disabled = false; }, 3000);
+};
+
 async function tick() {
   try {
     const [h, l, c] = await Promise.all([fetch('/health'), fetch('/logs?after=' + lastSeq), fetch('/conversation')]
       .map(p => p.then(r => r.json())));
     failures = 0;
+    lastHealth = h; lastChat = c;
     render(h);
     if (l.length) { logs = logs.concat(l).slice(-800); lastSeq = l[l.length - 1].seq; renderLogs(); }
     renderChat(c);
   } catch (e) {
-    if (++failures >= 2) { $('overall').className = 'badge bad'; $('overall').textContent = '看板连不上助手程序'; }
+    if (++failures >= 2) { $('overall').className = 'badge bad'; $('overall').textContent = T('看板连不上助手程序','Dashboard cannot reach the assistant'); }
   }
 }
-tick(); setInterval(tick, 2000);
 
 // ---- 实时画面：优先 WebRTC（低延迟、带声音），连不上自动改用 Frigate 图片流 ----
 const vid = $('vid'), img = $('mjpg');
-let pc = null, retryTimer = null, generation = 0;
+let pc = null, retryTimer = null, generation = 0, lastV = null;
+// text / msg 是返回当前语言文字的函数，切换语言时重新显示
 function vstate(text, cls, msg) {
-  $('vstate').className = 'badge ' + cls; $('vstate').textContent = text;
-  $('vmsg').hidden = !msg; if (msg) $('vmsg').textContent = msg;
+  lastV = [text, cls, msg];
+  $('vstate').className = 'badge ' + cls; $('vstate').textContent = text();
+  $('vmsg').hidden = !msg; if (msg) $('vmsg').textContent = msg();
 }
+const fail = (zh, en) => { const e = new Error(en); e.zh = zh; return e; };
+const errText = e => e.zh ? T(e.zh, e.message) : e.message;
 function stopVideo() {
   generation++;
   clearTimeout(retryTimer);
@@ -358,7 +426,8 @@ async function startWebRTC(gen) {
     pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); } });
   });
   const resp = await fetch('/video/whep', {method: 'POST', headers: {'Content-Type': 'application/sdp'}, body: pc.localDescription.sdp});
-  if (!resp.ok) throw new Error(resp.status === 404 ? '摄像头还没出画面（机器人可能在休眠）' : 'Engine 返回 ' + resp.status);
+  if (!resp.ok) throw resp.status === 404 ? fail('摄像头还没出画面（机器人可能在休眠）', 'No camera picture yet (the robot may be asleep)')
+                                          : fail('Engine 返回 ' + resp.status, 'Engine returned ' + resp.status);
   await pc.setRemoteDescription({type: 'answer', sdp: await resp.text()});
   const state = await new Promise(res => {
     const t = setTimeout(() => res('timeout'), 7000);
@@ -368,21 +437,21 @@ async function startWebRTC(gen) {
     });
   });
   if (gen !== generation) return;
-  if (state !== 'connected') throw new Error('WebRTC 连接' + (state === 'failed' ? '失败' : '超时'));
+  if (state !== 'connected') throw state === 'failed' ? fail('WebRTC 连接失败', 'WebRTC connection failed') : fail('WebRTC 连接超时', 'WebRTC connection timed out');
   vid.hidden = false;
   $('boxesl').hidden = true; $('sound').hidden = false;
-  vstate('WebRTC 直播', 'ok', null);
+  vstate(() => T('WebRTC 直播','WebRTC live'), 'ok', null);
   mine.addEventListener('connectionstatechange', () => {
     if (gen === generation && ['failed', 'disconnected', 'closed'].includes(mine.connectionState)) {
-      vstate('已断开', 'warn', '画面断开，正在重连…'); retry(2000);
+      vstate(() => T('已断开','Disconnected'), 'warn', () => T('画面断开，正在重连…','Video dropped, reconnecting…')); retry(2000);
     }
   });
 }
 
 function startMJPEG(gen) {
   img.hidden = false;
-  img.onload = () => { if (gen === generation) vstate('图片流', 'ok', null); };
-  img.onerror = () => { if (gen === generation) { vstate('无画面', 'bad', '取不到画面（Frigate 未运行？），5 秒后重试'); retry(5000); } };
+  img.onload = () => { if (gen === generation) vstate(() => T('图片流','Image stream'), 'ok', null); };
+  img.onerror = () => { if (gen === generation) { vstate(() => T('无画面','No video'), 'bad', () => T('取不到画面（Frigate 未运行？），5 秒后重试','Cannot get video (is Frigate running?), retrying in 5 s')); retry(5000); } };
   img.src = '/video/mjpeg?boxes=' + ($('boxes').checked ? 1 : 0) + '&t=' + Date.now();
 }
 
@@ -391,23 +460,53 @@ async function startVideo() {
   const gen = generation, mode = $('vmode').value;
   $('boxesl').hidden = true;
   $('sound').hidden = true;
-  vstate('连接中…', 'idle', '正在连接机器人摄像头…');
+  vstate(() => T('连接中…','Connecting…'), 'idle', () => T('正在连接机器人摄像头…','Connecting to the robot camera…'));
   if (mode !== 'mjpeg') {
     try { await startWebRTC(gen); return; }
     catch (e) {
       if (gen !== generation) return;
       if (pc) { try { pc.close(); } catch (x) {} pc = null; }
-      if (mode === 'webrtc') { vstate('无画面', 'bad', e.message + '，5 秒后重试'); return retry(5000); }
+      if (mode === 'webrtc') { vstate(() => T('无画面','No video'), 'bad', () => errText(e) + T('，5 秒后重试',', retrying in 5 s')); return retry(5000); }
     }
   }
   $('boxesl').hidden = false; $('sound').hidden = true;
   startMJPEG(gen);
 }
 
+const soundLabel = () => { $('sound').textContent = vid.muted ? T('开声音','Sound on') : T('静音','Mute'); };
 $('vmode').onchange = startVideo;
 $('boxes').onchange = () => { if (!img.hidden) startMJPEG(generation); };
-$('sound').onclick = () => { vid.muted = !vid.muted; if (!vid.muted) vid.play().catch(() => {}); $('sound').textContent = vid.muted ? '开声音' : '静音'; };
+$('sound').onclick = () => { vid.muted = !vid.muted; if (!vid.muted) vid.play().catch(() => {}); soundLabel(); };
 $('vfull').onclick = () => { const s = $('screen'); document.fullscreenElement ? document.exitFullscreen() : s.requestFullscreen?.(); };
+
+// ---- 中英切换：静态文字带 data-en，动态内容按当前语言重新渲染 ----
+function applyLang() {
+  document.documentElement.lang = lang === 'en' ? 'en' : 'zh-CN';
+  document.title = T('EBO 助手看板', 'EBO Assistant Dashboard');
+  document.querySelectorAll('[data-en]').forEach(el => {
+    if (el.dataset.zh == null) el.dataset.zh = el.textContent;
+    el.textContent = lang === 'en' ? el.dataset.en : el.dataset.zh;
+  });
+  document.querySelectorAll('[data-en-title]').forEach(el => {
+    if (el.dataset.zhTitle == null) el.dataset.zhTitle = el.title;
+    el.title = lang === 'en' ? el.dataset.enTitle : el.dataset.zhTitle;
+  });
+  $('lang').textContent = lang === 'en' ? '中文' : 'English';
+  $('mjpg').alt = T('实时画面', 'Live view');
+  soundLabel();
+  if (lastV) vstate(...lastV);
+  if (lastHealth) render(lastHealth); else $('overall').textContent = T('连接中…','Connecting…');
+  if (lastChat) renderChat(lastChat); else $('chat').innerHTML = `<div class="empty">${T('还没有对话','No conversation yet')}</div>`;
+  if (dockNote && !(lastHealth && lastHealth.tracking_status === 'resting')) $('dockmsg').textContent = dockNote();
+  renderLogs();
+}
+$('lang').onclick = () => {
+  lang = lang === 'en' ? 'zh' : 'en';
+  try { localStorage.setItem('ebo-dashboard-lang', lang); } catch (e) {}
+  applyLang();
+};
+applyLang();
+tick(); setInterval(tick, 2000);
 startVideo();
 </script>
 </body>

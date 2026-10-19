@@ -25,6 +25,8 @@ services:
       # 通义千问单次连接最长 30 分钟
       EBO_SESSION_MAX_SECONDS: "1740"
       EBO_LOG_DIR: /app/logs
+      # 回充后不追人、闭嘴后安静模式的倒计时：程序重启（部署、崩溃、开机）后接着算
+      EBO_TIMERS_PATH: /data/timers.json
       TZ: ${TZ:-America/Toronto}
     ports:
       # 看板只在本机可访问

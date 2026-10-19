@@ -70,7 +70,7 @@ class Config:
     voice_wake_enabled: bool = True
 
     # Standby 唤醒（本地 Whisper）
-    whisper_model: str = 'base'
+    whisper_model: str = 'small'  # base 每句约 0.75 秒；small 约 2.6 秒但中文更准
     whisper_language: str = 'zh'
     wake_words: str = ''  # 逗号分隔；为空时任何中文语句都能唤醒
     standby_silence_ms: int = 900
@@ -83,12 +83,13 @@ class Config:
 
     # 视觉跟随
     tracking_enabled: bool = False
-    dock_rest_seconds: float = 600  # 用户说让它回去充电后，这么久不追人
+    dock_rest_seconds: float = 1080  # 用户说让它回去充电后，这么久（18 分钟）不追人
     quiet_seconds: float = 900      # 用户让它闭嘴后，这么久只认唤醒词
+    timers_path: str = ''  # 上面两个倒计时跨重启保存的文件；空 = 不保存（docker-compose 里设为 /data/timers.json）
     # 找人转圈时每个方向自己识别一次（同一个 YOLOv9），门槛比 Frigate 低，能认出半身/趴着的人
     tracking_scan_enabled: bool = True
     scan_model_path: str = '/models/yolov9-s-320.onnx'
-    scan_min_score: float = 0.35
+    scan_min_score: float = 0.5   # 0.35 时暗处噪点会被认成人
     tracking_dock_after_seconds: float = 300  # 跟随离开充电座后，这么久没看到人就回充（走远了先找一圈）
 
     # 机器人始终放在地上：发现桌面模式开着就自动关掉
@@ -202,6 +203,7 @@ class Config:
             'scan_min_score': 'EBO_SCAN_MIN_SCORE',
             'dock_rest_seconds': 'EBO_DOCK_REST_SECONDS',
             'quiet_seconds': 'EBO_QUIET_SECONDS',
+            'timers_path': 'EBO_TIMERS_PATH',
             'floor_mode': 'EBO_FLOOR_MODE',
             'night_vision_auto': 'EBO_NIGHT_VISION_AUTO',
             'vad_threshold': 'REALTIME_VAD_THRESHOLD',
