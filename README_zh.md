@@ -124,4 +124,4 @@ Repeated-phrase hallucinations are filtered: text like "做一件事做一件事
 
 <img width="1705" height="858" alt="image" src="https://github.com/user-attachments/assets/a2f65124-3300-409e-8bae-0537e4e25715" />
 
-
+现在暂时没有解决方法，是我手动处理的
