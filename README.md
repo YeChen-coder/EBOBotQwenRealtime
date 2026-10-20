@@ -261,3 +261,71 @@ English version:
 <img width="1868" height="1425" alt="Screenshot_19-10-2026_132222_127 0 0 1" src="https://github.com/user-attachments/assets/2b360bcb-82b1-422b-804e-7512d90985cd" />
 
 ---
+
+The free Qwen quota ran out, so while I was at it I checked the current usage. It has been running for 4 days anyway.
+
+I went through the usage spreadsheet against `logs/assistant.log`. There are no background jobs quietly running up the bill; the money mostly went into a few long "chatting with the TV" sessions.
+
+610 calls in 4 days, all from the same API key and the same IP.
+
+| Model | Calls | Input tokens | Share |
+|---|---|---|---|
+| qwen3.8-omni-flash-realtime (voice conversation) | 39 | **785k** | about 82% |
+| qwen-plus / flash / turbo (deciding "is this for the robot?") | 571 | 175k | small: about 300 tokens per call, 1 output token |
+
+**Within the voice conversations, 3 sessions account for about 80%:**
+
+| Local time | Duration | Input tokens | What the log shows |
+|---|---|---|---|
+| 10-17 07:51 | 29 min (hit the limit) | **450k (57%)** | Whisper misheard TV audio as "以下是简体的字。" ("the following is simplified text"), took it as a wake-up and opened a session. There was no "is this for me?" check yet, so the robot replied to TV drama lines 86 times |
+| 10-18 01:42 | 29 min (hit the limit) | 87k | TV on in the middle of the night: it heard 292 utterances and replied 22 times |
+| 10-18 02:53 | 29 min (hit the limit) | 93k | The "嗯，我在听" ("mm, I'm listening") loop: 24 replies |
+
+The last two problems were already fixed in `144a61a` (the "I'm listening" loop) and `6ee8d8d` (idle timeout). Since 10-19, voice conversation usage is down to 30k–70k tokens a day.
+
+All in all, the token usage is fine now.
+
+One thing did worry me, though: the logic that decides whether a sound comes from the TV used to commit the audio into the main conversation first and only then decide. That way, TV or video audio drags the whole chat off course.
+
+So I reworked it and split them apart: a separate connection with the same model does the speech recognition, and the decision happens there.
+
+As for why speech recognition has to go through an API: local Whisper takes too long (and above all Whisper still eats a lot of the computer's compute. If you turn its recognition mode up to make it more accurate, processing time really does multiply, to about two or three seconds; that's really not an option). It's not that it would add a huge amount of latency, but the setup already has a big geographic distance baked in, and I'm not keen on adding more time on top of that.
+
+claude code addendum (10-20):
+
+**1. After the split, each turn in a conversation goes like this**
+
+1. Local WebRTC VAD decides the sentence is finished (unchanged).
+2. While the person is talking, the audio streams to a separate recognition connection, **`qwen3-asr-flash-realtime`** (`asr_realtime.py`). **It is not sent to the conversation model.**
+3. Once they finish, the recognition connection returns the text in 0.5–1.4 s. The conversation model's built-in transcription used to take 1.6 s at the median, and over 5 s when slow.
+4. The same checks as before: no content, not talking to it, asking it to shut up, asking it to go charge.
+5. Only if it is going to answer is this turn's audio sent to **`qwen3.8-omni-flash-realtime`** in one go, which then answers. For turns it doesn't answer, the conversation model never hears anything at all.
+
+That is how steps 2 and 3 in "B. During a conversation" above have changed. If the recognition connection drops, it falls back to local Whisper and reconnects in the background (in testing it was back about 1 s after dropping); tested after 280 s idle, the connection was still up.
+
+**2. A pitfall: `clear` doesn't clear**
+
+The original plan was to stream the audio to the conversation model while the person talks, and use `input_audio_buffer.clear` to throw it away when not answering. Testing showed that as soon as the sentence ends with silence (real recordings always do), the server has already cut it into a segment and stored it, and `clear` doesn't remove it. Worse, the next commit then submits the sentence that should have been thrown away, and the sentence that actually needs an answer is lost. This behavior isn't documented.
+
+So it now decides first and sends in one go. The cost is that the voice starts 0.2–0.9 s later, which the faster recognition offsets almost exactly; overall waiting time is about the same as before.
+
+**3. How it got dragged off course before the change (verbatim from the logs)**
+
+- 10-19 morning: a stretch of TV drama full of swearing got into the context. Afterwards Mom said "其实我记得我怎么去过哈尔滨呢？也去旅游去" ("actually, I remember going to Harbin, on a trip too"), and it replied "听你这一通说下来，感觉你心里憋屈得厉害……" ("listening to all that, you sound really frustrated…").
+- 10-20 morning: some music got into the context. First it said "这歌听着挺温柔，是《小幸运》吧" ("this song sounds gentle, is it 'A Little Happiness'?"); Mom asked "今天多少？" ("what is it today?"), and it answered "我听着像是《小幸运》，田馥甄唱的。" ("sounds like 'A Little Happiness' to me, sung by Hebe Tien.").
+
+In these sessions, 64%–96% of the turns were TV, music or noise. Those turns transcribed as empty, but their audio still went into the context.
+
+**4. The "谢谢" ("thank you") false wake-ups**
+
+On 10-20 at 06:02, 07:36 and 10:58, it was woken by "谢谢" three times. It turned out local Whisper made the word up on noise; nobody was speaking. The same audio sent to Qwen for recognition came back empty.
+
+Whisper's training data contains a huge amount of video subtitles, and videos often end with "谢谢观看" ("thanks for watching") or "谢谢大家" ("thank you all"), so on silence and noise it easily produces phrases like these. All three happened after Whisper was switched from base to small on 10-19 (base made up "请用简体字" ("please use simplified characters") instead).
+
+The fix: in standby, if the whole sentence is only a stock phrase like "谢谢", "谢谢你" or "谢谢大家" and there is no wake word, it doesn't wake. "谢谢你猫猫" ("thank you, kitty") still wakes it.
+
+**5. Also**
+
+- Every reply now writes a usage line to the log, `Response completed; usage: input …`, so checking the bill no longer involves guesswork.
+- Web search stays on. In the logs, text tokens per reply stayed steady at 1,200–1,350 and never looked like an actual web search happened. Having it on adds a fixed ~300 tokens per reply (the search tool's description), which is acceptable.
+- The new recognition connection is billed per second (¥0.00033/s), only for the speech segments: well under ¥1 a day.
