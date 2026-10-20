@@ -35,7 +35,7 @@ The project is **self-contained**: the robot adapter (EBO Engine), person detect
 | `frigate` | Person detection for visual following | `frigate/config.yml` |
 | `mosquitto` | Frigate event bus | `frigate/mosquitto.conf` |
 
-Main modules: `runtime.py` (main loop, dashboard API), `conversation.py` (one conversation), `qwen_realtime.py` (Qwen Realtime client), `standby_voice.py` (standby wake), `addressee.py` (is this speech for the robot?), `person_tracker.py` (following + auto-docking), `ebo_transport.py` (audio transport to the Engine), `monitoring.py` (logs and dashboard).
+Main modules: `runtime.py` (main loop, dashboard API), `conversation.py` (one conversation), `qwen_realtime.py` (Qwen Realtime client), `asr_realtime.py` (separate speech recognition during a conversation: judge first, then hand the turn to the conversation model), `standby_voice.py` (standby wake), `wake_match.py` (wake-word matching by pronunciation), `addressee.py` (is this speech for the robot?), `greeter.py` (greets family members when they come home), `person_tracker.py` (following + auto-docking), `scan_detector.py` (its own double-check during search spins), `ebo_transport.py` (audio transport to the Engine), `monitoring.py` (logs and dashboard).
 
 ## Start / stop
 

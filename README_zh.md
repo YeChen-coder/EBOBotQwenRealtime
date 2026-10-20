@@ -35,7 +35,7 @@ EBO 机器人的家庭语音助手，**不用唤醒词**，自然接话：
 | `frigate` | 人体检测，供视觉跟随 | `frigate/config.yml` |
 | `mosquitto` | Frigate 事件总线 | `frigate/mosquitto.conf` |
 
-主要代码：`runtime.py`（主程序、看板接口）、`conversation.py`（一次对话）、`qwen_realtime.py`（通义千问客户端）、`standby_voice.py`（待机唤醒）、`addressee.py`（判断是不是在跟机器人说话）、`person_tracker.py`（视觉跟随与自动回充）、`ebo_transport.py`（与 Engine 的音频传输）、`monitoring.py`（日志与看板）。
+主要代码：`runtime.py`（主程序、看板接口）、`conversation.py`（一次对话）、`qwen_realtime.py`（通义千问客户端）、`asr_realtime.py`（对话中单独的语音识别，先判断再交给对话模型）、`standby_voice.py`（待机唤醒）、`wake_match.py`（唤醒词按读音比对）、`addressee.py`（判断是不是在跟机器人说话）、`greeter.py`（家人回家时主动打招呼）、`person_tracker.py`（视觉跟随与自动回充）、`scan_detector.py`（转圈找人时自己再看一眼）、`ebo_transport.py`（与 Engine 的音频传输）、`monitoring.py`（日志与看板）。
 
 ## 启动 / 停止
 
