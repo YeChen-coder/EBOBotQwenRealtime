@@ -69,6 +69,8 @@ class QwenConfig:
     vad_prefix_padding_ms: int = 300
     server_vad: bool = False
     enable_search: bool = False
+    # 会话里改由单独的识别连接转写（asr_realtime.py），这里关掉，免得同一段音频转两遍
+    transcribe_input: bool = True
 
 
 class QwenRealtimeClient:
@@ -326,7 +328,8 @@ class QwenRealtimeClient:
                         },
                     },
                 },
-                'input_audio_transcription': {'model': 'qwen3-asr-flash-realtime'},
+                'input_audio_transcription': ({'model': 'qwen3-asr-flash-realtime'}
+                                              if self.config.transcribe_input else None),
                 # 模型自行决定何时联网搜索；与 tools 互斥
                 'enable_search': self.config.enable_search,
                 'turn_detection': ({
@@ -372,9 +375,11 @@ class QwenRealtimeClient:
     # 向后兼容别名
     commit_audio = commit_audio_buffer
 
-    async def create_response(self):
-        """请求生成响应（手动模式）"""
+    async def create_response(self, instructions: str = ''):
+        """请求生成响应（手动模式）；instructions 只对这一次回答生效（如主动打招呼）"""
         message = {'type': EventType.RESPONSE_CREATE}
+        if instructions:
+            message['response'] = {'instructions': instructions}
         await self._send(message)
 
     async def clear_audio_buffer(self):

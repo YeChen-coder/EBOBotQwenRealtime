@@ -105,9 +105,13 @@ services:
       - ./data/frigate:/config
       - ./frigate/config.yml:/config/config.yml:ro
       - ./frigate/models:/models:ro
+      # 人脸库和待筛的人脸截图（clips/faces），重启后要还在
+      - ./data/frigate-media:/media/frigate
+    ports:
+      # Frigate 页面（筛人脸用），只在本机可访问
+      - "127.0.0.1:8102:5000"
     tmpfs:
       - /tmp/cache:size=100000000
-      - /media/frigate:size=50000000
     networks: [ebo]
     logging: *bounded-logging
 

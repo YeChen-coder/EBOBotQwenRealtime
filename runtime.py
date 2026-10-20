@@ -21,6 +21,7 @@ from conversation import Conversation
 from ebo_transport import AudioStore, AssistantOutputStore, EboAPI, Speaker, TranscriptStore
 from monitoring import (DASHBOARD_HTML, LogBuffer, add_ice_host, mjpeg_url,
                         recent_conversation, setup_logging, whep_url)
+from greeter import HomecomingGreeter
 from person_tracker import PersonTracker
 from scan_detector import ScanDetector
 from standby_voice import StandbyVoice, VoiceTurn
@@ -96,6 +97,40 @@ class Supervisor:
             self.tracker.rest(self.config.dock_rest_seconds)
         self.state.update(last_voice_dock_at=time.time())
 
+    def greet_homecoming(self, face_name: str) -> bool:
+        """Frigate 认出家人刚回家：主动开口打招呼。正在聊天、暂停、安静模式时不打扰。"""
+        profile = next((p for p in self.config.profiles if p.face_name == face_name), None)
+        if profile is None or self.wake.quiet_active():
+            return False
+        name = profile.display_name
+        # 家人的工作等背景属于隐私，放在 .env（EBO_GREET_CONTEXT），不进代码仓库
+        background = f'关于{name}：{self.config.greet_context}\n' if self.config.greet_context else ''
+        prompt = (
+            f'{name}刚刚下班回到家，现在就在你面前。你要主动开口，像家里盼着她回来的小伙伴一样，'
+            f'开心地迎接她，开启一段聊天，而不是打完招呼就结束。\n'
+            f'{background}'
+            f'这一轮先说两三句：欢迎{name}回家，心疼她上班辛苦（比如让她先坐下歇会儿、喝口水），'
+            f'然后用一个轻松、具体、好回答的问题把话头递给她。每次只问一个问题，'
+            f'也不要每天都问同一句。第一个问题要轻松、往好处问（累不累、今天顺不顺、想吃点什么），'
+            f'别一进门就提糟心事；不要假设她今天发生了什么（比如嗓子疼、挨了气），她说了才算。\n'
+            f'她回答以后，顺着她的话继续聊：她累了就多体贴、少提问；她想吐槽就认真听、站在她这边，'
+            f'先共情、肯定她的辛苦，不要讲大道理、不要急着给建议、不要替别人说话，'
+            f'也不要追问事情的细节和原因（那是让她再讲一遍糟心事）；'
+            f'聊工作聊够了，就帮她把心思从工作上拉回来，聊点轻松的（吃什么、休息、开心的小事）；'
+            f'她不想多说就安静陪着，告诉她有事随时叫你。'
+            f'你是地上的小机器人，只能说话、跟着她走，不要主动说要帮她拿东西、做饭、看冰箱这类做不到的事。\n'
+            f'语气口语、温暖、自然，每次两三句，不要长篇大论，不要提摄像头、人脸识别或“检测到”。'
+        )
+        with self.lock:
+            if not self.voice_eligible():
+                LOG.info('Skipped homecoming greeting for %s: busy or paused', name)
+                return False
+            try:
+                return self.start(profile.id, 'greeting', opening_prompt=prompt)
+            except ValueError as exc:
+                LOG.info('Skipped homecoming greeting for %s: %s', name, exc)
+                return False
+
     def voice_eligible(self) -> bool:
         snapshot = self.state.snapshot()
         return (self.enabled and not self.stopping.is_set() and self.active is None
@@ -110,7 +145,7 @@ class Supervisor:
             return self.start('guest', 'voice', turn)
 
     def start(self, user_id: str = 'mother', trigger: str = 'manual',
-              initial_turn: VoiceTurn | None = None) -> bool:
+              initial_turn: VoiceTurn | None = None, opening_prompt: str = '') -> bool:
         """启动新会话"""
         profile = (GUEST_PROFILE if user_id == 'guest' and trigger == 'voice'
                    else self.config.profile(user_id))
@@ -133,6 +168,7 @@ class Supervisor:
                 self.state, self.transcripts, self.outputs, trigger
             )
             conversation.initial_turn = initial_turn
+            conversation.opening_prompt = opening_prompt
             conversation.addressee = self.wake.addressee
             conversation.wake_words = self.wake.wake_words
             conversation.on_dock_request = self.handle_dock_request
@@ -619,6 +655,11 @@ def main():
         threads.append(threading.Thread(target=tracker.run, daemon=True, name='person-tracker'))
         LOG.info('Visual person following enabled')
 
+    greeter = None
+    if config.proactive_greeting:
+        greeter = HomecomingGreeter(config, supervisor.greet_homecoming)
+        greeter.start_mqtt()
+
     stop = threading.Event()
 
     def shutdown(_signum, _frame):
@@ -643,6 +684,8 @@ def main():
     # 清理
     if tracker:
         tracker.stop()
+    if greeter is not None:
+        greeter.stop()
     capture.stop()
     supervisor.stop()
     httpd.shutdown()

@@ -35,6 +35,13 @@ def save(path: str, name: str, until_wall: float) -> None:
             LOG.warning('Cannot save %s timer: %s', name, exc)
 
 
+def has(path: str, name: str) -> bool:
+    if not path:
+        return False
+    with _lock:
+        return name in _read(Path(path))
+
+
 def remaining(path: str, name: str) -> float:
     """还剩多少秒（已过期或没有记录返回 0）。"""
     if not path:

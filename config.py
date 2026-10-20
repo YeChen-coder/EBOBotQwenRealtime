@@ -29,6 +29,8 @@ class Config:
     qwen_workspace_id: str = ''
     qwen_region: str = 'cn'  # 'cn' for Beijing, 'intl' for Singapore
     qwen_model: str = 'qwen3.8-omni-flash-realtime'
+    # 会话中先用它听清这一轮说了什么，判断完再决定音频要不要交给对话模型（见 asr_realtime.py）
+    qwen_asr_model: str = 'qwen3-asr-flash-realtime'
     qwen_voice: str = 'longanlingxin'
 
     # EBO 机器人配置
@@ -66,7 +68,12 @@ class Config:
     session_max_seconds: float = 2700
     cooldown_seconds: float = 90
     absence_seconds: float = 25
-    proactive_greeting: bool = False
+    # 家人回家主动打招呼（greeter.py）：认出这些人脸、且已经这么久没见到、且在这个时段内
+    proactive_greeting: bool = True
+    greet_names: str = '妈妈'
+    greet_away_seconds: float = 10800
+    greet_hours: str = '11-23'
+    greet_context: str = ''  # 家人的背景（工作等），写进迎接提示词；隐私，只放 .env
     voice_wake_enabled: bool = True
 
     # Standby 唤醒（本地 Whisper）
@@ -150,6 +157,10 @@ class Config:
             raise ValueError(f'Invalid QWEN_REGION: {self.qwen_region}')
         return f'wss://{hosts[self.qwen_region]}/api-ws/v1/realtime?model={self.qwen_model}'
 
+    @property
+    def qwen_asr_ws_url(self) -> str:
+        return self.qwen_ws_url.replace(f'model={self.qwen_model}', f'model={self.qwen_asr_model}')
+
     @classmethod
     def from_env(cls) -> Config:
         """从环境变量加载配置"""
@@ -159,6 +170,7 @@ class Config:
             'qwen_workspace_id': 'QWEN_WORKSPACE_ID',
             'qwen_region': 'QWEN_REGION',
             'qwen_model': 'QWEN_MODEL',
+            'qwen_asr_model': 'QWEN_ASR_MODEL',
             'qwen_voice': 'EBO_VOICE',
         }
 
@@ -188,6 +200,10 @@ class Config:
             'cooldown_seconds': 'EBO_COOLDOWN_SECONDS',
             'absence_seconds': 'EBO_ABSENCE_SECONDS',
             'proactive_greeting': 'EBO_PROACTIVE_GREETING_ENABLED',
+            'greet_names': 'EBO_GREET_NAMES',
+            'greet_away_seconds': 'EBO_GREET_AWAY_SECONDS',
+            'greet_hours': 'EBO_GREET_HOURS',
+            'greet_context': 'EBO_GREET_CONTEXT',
             'voice_wake_enabled': 'EBO_VOICE_WAKE_ENABLED',
             'whisper_model': 'EBO_WHISPER_MODEL',
             'whisper_language': 'EBO_WHISPER_LANGUAGE',

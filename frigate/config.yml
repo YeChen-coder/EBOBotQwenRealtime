@@ -24,9 +24,17 @@ model:
   path: /models/yolov9-s-320.onnx
   labelmap_path: /labelmap/coco-80.txt
 
-# 本项目只用人体检测（视觉跟随），不做人脸识别：省 CPU、不用下载人脸模型
+# 人脸识别：先“囤”机器人贴地视角拍到的脸（Frigate 页面“人脸库 → 训练”里），
+# 家人筛过、归到“妈妈/爸爸”后，识别才会认得这个仰拍角度。
+# 手机拍的正脸照和贴地仰拍差太多，只靠它们实测认不出人。
 face_recognition:
-  enabled: false
+  enabled: true
+  model_size: small
+  # 640x360 画面里脸很小（实测 60~90 像素见方），默认 750 平方像素会漏掉站远一点的人
+  min_area: 400
+  # 训练区最多留多少张，留够筛选的量
+  save_attempts: 500
+  recognition_threshold: 0.9
 
 objects:
   track:

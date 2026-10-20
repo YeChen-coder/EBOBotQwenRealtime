@@ -20,6 +20,9 @@ LOG = logging.getLogger('ebo-standby-voice')
 
 # Whisper 在噪声/静音上常编出的固定句子（训练数据里的视频字幕）
 HALLUCINATIONS = ('字幕', '订阅', '点赞', '打赏', '转发', 'Amara', '谢谢观看', '感谢观看', '请不吝')
+# 整句只有这些客套话时不唤醒：Whisper small 在噪声上会编出“谢谢”（视频结尾字幕），
+# 实测 10-20 把机器人唤醒了三次，Qwen 对同一段音频转出来是空的。只拦整句，“谢谢你猫猫”照常唤醒
+STOCK_PHRASES = {'谢谢', '谢谢谢谢', '谢谢你', '谢谢大家', '谢谢收看', '谢谢收听', '感谢收看', '感谢收听'}
 
 RECENT_CONTEXT_SECONDS = 60
 REPEATED = re.compile(r'(.{1,10}?)\1{2,}')
@@ -48,8 +51,12 @@ def actionable_transcript(transcript: str) -> bool:
     return not (words and len(words) <= 3 and len(normalized) <= 24)
 
 
+def compact_text(text: str) -> str:
+    return ''.join(re.findall(r'[\w一-鿿]', text or '')).lower()
+
+
 def valid_wake_text(text: str, wake_words: tuple[str, ...] = ()) -> bool:
-    compact = ''.join(re.findall(r'[\w一-鿿]', text or '')).lower()
+    compact = compact_text(text)
     if len(compact) < 2 or compact in FILLER_WORDS or not actionable_transcript(text):
         return False
     # Whisper 典型幻觉：同一短语重复好几遍（实测“做一件事做一件事做一件事”把机器人唤醒了）
@@ -245,9 +252,12 @@ class StandbyVoice:
     def should_wake(self, text: str) -> bool:
         if not valid_wake_text(text):
             return False
+        wake_word = bool(self.wake_words) and has_wake_word(text, self.wake_words)
+        if not wake_word and compact_text(text) in STOCK_PHRASES:
+            LOG.info('standby ignored a stock phrase Whisper makes up on noise: %r', text)
+            return False
         recent = self.recent_heard()
         self.heard.append((time.monotonic(), text))
-        wake_word = bool(self.wake_words) and has_wake_word(text, self.wake_words)
         if self.quiet_active() and not wake_word:
             return False
         # 待机时直接说“闭嘴”：不唤醒，进入安静（含唤醒词的“猫猫闭嘴”同理）

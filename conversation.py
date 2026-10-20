@@ -1,7 +1,8 @@
 """对话管理模块 - 连接通义千问 API 和 EBO 传输层
 
-手动轮次模式（turn_detection=None）：本地 VAD 判断一轮结束后
-commit 音频缓冲并 response.create；机器人说话期间不送麦克风音频，避免自我打断。
+手动轮次模式（turn_detection=None）：本地 VAD 判断一轮结束后，先由单独的识别连接转出文字、
+判断是不是在跟机器人说，是才把这一轮音频送进对话、commit 并 response.create，否则丢掉
+（电视声、噪声不进对话上下文）；机器人说话期间不送麦克风音频，避免自我打断。
 """
 from __future__ import annotations
 import asyncio
@@ -12,6 +13,7 @@ import time
 import uuid
 from collections import deque
 
+from asr_realtime import RealtimeTranscriber
 from audio_utils import EndOfTurnDetector, resample_24k_to_16k
 from config import Config, Profile
 from qwen_realtime import QwenRealtimeClient, QwenConfig
@@ -62,10 +64,12 @@ class Conversation:
         # 唤醒句（standby_voice.VoiceTurn）与连接建立前到达的音频；
         # 两者都必须在实时麦克风音频之前送达模型，保证用户输入不丢。
         self.initial_turn = None
+        self.opening_prompt = ''  # 非空时一连上就主动开口（家人回家打招呼）
         self.startup_audio: deque[bytes] = deque(maxlen=600)  # 100 ms 块 -> 最多 60 s
         self.startup_lock = threading.Lock()
 
         self.qwen: QwenRealtimeClient | None = None
+        self.asr: RealtimeTranscriber | None = None
 
         self.session_id = f'session_{uuid.uuid4().hex[:12]}'
         self.session_started_at = time.time()
@@ -81,9 +85,7 @@ class Conversation:
             silence_frames=max(10, config.vad_silence_duration_ms // 20))
         self.uncommitted_audio = False
         self.preroll: deque[bytes] = deque(maxlen=3)
-        self.transcript_results: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
         self.turn_audio = bytearray()       # 本轮已送给模型的 24 kHz 音频，转录迟到时本地转写用
-        self.committed_item: str | None = None
         self.local_transcribe = None        # 由 Supervisor 注入（StandbyVoice 的本地 Whisper）
         self.awaiting_transcript = False
         # 由 Supervisor 注入（StandbyVoice 里同一个判断器）；None 表示不判断，有话就回
@@ -149,6 +151,7 @@ class Conversation:
             vad_prefix_padding_ms=self.config.vad_prefix_padding_ms,
             server_vad=False,
             enable_search=self.config.web_search_enabled,
+            transcribe_input=False,
         )
 
         self.qwen = QwenRealtimeClient(qwen_config)
@@ -157,24 +160,41 @@ class Conversation:
         self.qwen.on_audio_done = self._handle_audio_done
         self.qwen.on_transcript_delta = self._handle_transcript_delta
         self.qwen.on_transcript_done = self._handle_transcript_done
-        self.qwen.on_user_transcript = self._handle_user_transcript
-        self.qwen.on_committed = self._handle_committed
         self.qwen.on_response_created = self._handle_response_created
         self.qwen.on_response_done = self._handle_response_done
         self.qwen.on_error = self._handle_error
         self.qwen.on_closed = self._handle_closed
 
-        await self.qwen.connect()
+        self.asr = RealtimeTranscriber(self.config.qwen_api_key, self.config.qwen_asr_ws_url)
+        # 两条连接同时建，不多等；识别连接失败不影响聊天，判断改用本地 Whisper（慢 1~2 秒）
+        qwen_result, asr_result = await asyncio.gather(self.qwen.connect(), self.asr.connect(),
+                                                       return_exceptions=True)
+        if isinstance(qwen_result, BaseException):
+            raise qwen_result
+        if isinstance(asr_result, BaseException):
+            LOG.warning('ASR connection failed (%r); judging turns with local Whisper until it reconnects',
+                        asr_result)
+            self.asr.reconnect_later()
 
     def _instructions(self) -> str:
         name = self.profile.display_name
         text = f'{self.config.instructions}\n当前和你说话的是：{name}。' if name else self.config.instructions
+        if self.opening_prompt:
+            # response.create 里的 instructions 只管第一句；后面怎么接着聊要放进整场对话的指令里
+            text += f'\n这场对话是你主动开始的：{self.opening_prompt}'
         # 回充由程序在听到请求时自动执行，模型只需要答应，不能说自己做不到
         return text + DOCK_INSTRUCTION
 
     async def _opening(self):
         """先送唤醒句音频，再由主循环送 startup_audio 与实时音频，最后统一 commit。"""
         turn, self.initial_turn = self.initial_turn, None
+        if self.opening_prompt:
+            LOG.info('Opening by speaking first: %s', self.trigger)
+            # 我们先开口，对方接下来的第一句话一定是在回我们，不用再判断是不是在跟机器人说
+            self.skip_addressee_once = True
+            self.response_active = True
+            await self.qwen.create_response(self.opening_prompt)
+            return
         if turn is None:
             return
         # 唤醒句在待机时已经判断过是在对机器人说，第一轮不再重复判断
@@ -187,8 +207,7 @@ class Conversation:
                 session_started_at=self.session_started_at,
                 user_id=self.profile.id,
             )
-        await self.qwen.send_audio(resample_24k_to_16k(turn.pcm))
-        self.turn_audio.extend(turn.pcm)
+        await self._send_turn_audio(turn.pcm)
         self.uncommitted_audio = True
         # 唤醒句本身已是完整语音；后续静音达到阈值即提交，期间的追加话语一并进入本轮
         self.turn_detector.mark_speech()
@@ -245,11 +264,8 @@ class Conversation:
             if voiced or self.turn_detector.has_speech or self.uncommitted_audio:
                 # 语音起始前的 300 ms 一并送出，避免截掉第一个字
                 while self.preroll:
-                    chunk = self.preroll.popleft()
-                    self.turn_audio.extend(chunk)
-                    await self.qwen.send_audio(resample_24k_to_16k(chunk))
-                self.turn_audio.extend(pcm)
-                await self.qwen.send_audio(resample_24k_to_16k(pcm))
+                    await self._send_turn_audio(self.preroll.popleft())
+                await self._send_turn_audio(pcm)
                 self.uncommitted_audio = True
             else:
                 self.preroll.append(pcm)
@@ -260,47 +276,63 @@ class Conversation:
                 self.state.update(input_speech_active=False)
                 await self._finish_user_turn()
 
+    async def _send_turn_audio(self, pcm: bytes):
+        """这一轮的音频：只实时送给识别连接；对话模型等判断完、要回复时才一次性送（见 _settle_turn）。"""
+        self.turn_audio.extend(pcm)
+        if self.asr:
+            self.asr.send_audio(resample_24k_to_16k(pcm))
+
     async def _finish_user_turn(self):
         if self.close_requested.is_set():
             self.stop.set()
             return
-        LOG.info('User turn ended; committing audio')
+        LOG.info('User turn ended; transcribing before deciding whether to commit')
         self.uncommitted_audio = False
         self.turn_detector.reset()
         turn_pcm = bytes(self.turn_audio)
         self.turn_audio.clear()
-        self.committed_item = None
-        while not self.transcript_results.empty():
-            self.transcript_results.get_nowait()
         self.awaiting_transcript = True
-        await self.qwen.commit_audio_buffer()
-        asyncio.create_task(self._respond_if_speech(turn_pcm))
+        transcript = self.asr.commit() if self.asr else None
+        asyncio.create_task(self._respond_if_speech(turn_pcm, transcript))
 
-    async def _turn_transcript(self, turn_pcm: bytes) -> str:
-        """这一轮说了什么。服务端转录迟到时用本地 Whisper：实测电视噪声的转录常常 6 秒以上才回来
+    async def _turn_transcript(self, turn_pcm: bytes, transcript: asyncio.Future | None) -> str:
+        """这一轮说了什么。识别连接超时或断开时用本地 Whisper：实测电视噪声的转录常常 6 秒以上才回来
         而且是空的，以前超时就“照常回复”，模型只能反复说“我在听”。"""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + TRANSCRIPT_WAIT_SECONDS
-        while (remaining := deadline - loop.time()) > 0:
+        if transcript is not None:
             try:
-                item_id, text = await asyncio.wait_for(self.transcript_results.get(), remaining)
+                text = await asyncio.wait_for(transcript, TRANSCRIPT_WAIT_SECONDS)
             except asyncio.TimeoutError:
-                break
-            if self.committed_item and item_id and item_id != self.committed_item:
-                LOG.info('Dropped late transcript of an earlier turn: %r', text)
-                continue
-            return text
+                text = None
+            if text is not None:
+                return text
         if self.local_transcribe is None:
             LOG.warning('No transcript within %ss and no local transcriber; ignoring turn', TRANSCRIPT_WAIT_SECONDS)
             return ''
         text = await asyncio.to_thread(self.local_transcribe, turn_pcm)
-        LOG.info('Server transcript late; local Whisper heard: %r', text)
+        LOG.info('ASR transcript late or unavailable; local Whisper heard: %r', text)
         return text
 
-    async def _respond_if_speech(self, turn_pcm: bytes):
-        """只有这一轮真的有人说话才回复：噪声/电视声被切成一轮时转录为空，回复会变成反复道歉。"""
+    async def _settle_turn(self, turn_pcm: bytes, respond: bool):
+        """判断完：要回复才把这一轮音频送进对话并 commit；否则对话模型根本听不到（电视声、噪声不进上下文）。
+        不能边说边送、不回复时再 clear：实测音频结尾带静音时服务端已经切好段，clear 清不掉，
+        commit 进去的反而是被丢弃的那句。一次性送比边说边送晚 0.2~0.9 秒出声，识别连接快回来了。"""
         try:
-            text = await self._turn_transcript(turn_pcm)
+            if respond and self.qwen and not self.stop.is_set():
+                await self.qwen.send_audio(resample_24k_to_16k(turn_pcm))
+                await self.qwen.commit_audio_buffer()
+                self.last_activity = time.monotonic()
+                self.response_active = True
+                self.state.increment('manual_responses_requested')
+                await self.qwen.create_response()
+        finally:
+            self.awaiting_transcript = False
+
+    async def _respond_if_speech(self, turn_pcm: bytes, transcript: asyncio.Future | None):
+        """只有这一轮真的有人说话才回复：噪声/电视声被切成一轮时转录为空，回复会变成反复道歉。"""
+        respond = False
+        try:
+            text = await self._turn_transcript(turn_pcm, transcript)
+            self._record_user_text(text)
             if not valid_wake_text(text):
                 LOG.info('Ignored turn without real speech: %r', text)
                 self.state.increment('input_turns_ignored')
@@ -328,14 +360,9 @@ class Conversation:
                     LOG.info('Voice request to go charge: %r', text)
                     self.last_dock_request = time.monotonic()
                     await asyncio.to_thread(self.on_dock_request)
-            if self.stop.is_set() or self.response_active or not self.qwen:
-                return
-            self.last_activity = time.monotonic()
-            self.response_active = True
-            self.state.increment('manual_responses_requested')
-            await self.qwen.create_response()
+            respond = not (self.stop.is_set() or self.response_active or not self.qwen)
         finally:
-            self.awaiting_transcript = False
+            await self._settle_turn(turn_pcm, respond)
 
     def offer_audio(self, pcm: bytes):
         """接收来自 EBO 的 24 kHz 音频（可在会话连上之前调用）"""
@@ -394,18 +421,13 @@ class Conversation:
             )
         self.current_transcript_buffer = ''
 
-    def _handle_committed(self, item_id: str):
-        self.committed_item = item_id or None
-
-    def _handle_user_transcript(self, item_id: str, transcript: str):
-        """处理用户语音转录（需服务端开启 input_audio_transcription）"""
+    def _record_user_text(self, transcript: str):
+        """这一轮听到的话：记日志和转录，并放进 heard（判断电视对白时连起来看）"""
         LOG.info('User said: %s', transcript)
-        self.transcript_results.put_nowait((item_id, transcript))
         if transcript.strip():
             self.heard.append((time.monotonic(), transcript.strip()))
-        if transcript.strip():
             self.transcripts.append(
-                item_id=item_id,
+                item_id=f'turn_{uuid.uuid4().hex[:24]}',
                 transcript=transcript,
                 session_started_at=self.session_started_at,
                 user_id=self.profile.id,
@@ -413,7 +435,12 @@ class Conversation:
 
     def _handle_response_done(self, event: dict):
         """处理响应完成"""
-        LOG.info('Response completed')
+        # 每次回复的计费 tokens（整场对话的上下文都会重新计一遍输入），方便对照账单
+        usage = (event.get('response') or {}).get('usage') or {}
+        details = usage.get('input_tokens_details') or {}
+        LOG.info('Response completed; usage: input %s (text %s, audio %s), output %s',
+                 usage.get('input_tokens'), details.get('text_tokens'), details.get('audio_tokens'),
+                 usage.get('output_tokens'))
         self.response_active = False
         self.last_activity = time.monotonic()
         self.turn_detector.reset()
@@ -459,6 +486,9 @@ class Conversation:
 
     async def _cleanup(self):
         LOG.info('Cleaning up conversation session')
+        if self.asr:
+            await self.asr.close()
+            self.asr = None
         if self.qwen:
             await self.qwen.close()
             self.qwen = None
