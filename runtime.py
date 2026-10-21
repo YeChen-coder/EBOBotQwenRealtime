@@ -22,6 +22,7 @@ from ebo_transport import AudioStore, AssistantOutputStore, EboAPI, Speaker, Tra
 from monitoring import (DASHBOARD_HTML, LogBuffer, add_ice_host, mjpeg_url,
                         recent_conversation, setup_logging, whep_url)
 from greeter import HomecomingGreeter
+from weather_brief import WeatherBrief
 from person_tracker import PersonTracker
 from scan_detector import ScanDetector
 from standby_voice import StandbyVoice, VoiceTurn
@@ -50,6 +51,7 @@ class Supervisor:
         self.enabled = True
         self.wake = StandbyVoice(config, state, self.voice_eligible, self.accept_voice)
         self.tracker = None  # main() 在启用视觉跟随时设置
+        self.weather = None  # main() 在启用早上天气播报时设置
         self.wake.on_quiet_request = self.handle_quiet_request
         self.wake.on_dock_request = self.handle_dock_request
 
@@ -130,6 +132,14 @@ class Supervisor:
             except ValueError as exc:
                 LOG.info('Skipped homecoming greeting for %s: %s', name, exc)
                 return False
+
+    def play_prepared(self, pcm: bytes, label: str) -> bool:
+        """播一段准备好的音频（早上的天气）。正在聊天、暂停、安静模式时不播，返回 False 稍后再试。"""
+        with self.lock:
+            if not self.voice_eligible() or self.wake.quiet_active():
+                return False
+            self.speaker.finish_stream(pcm, f'{label}_{int(time.time())}')
+            return True
 
     def voice_eligible(self) -> bool:
         snapshot = self.state.snapshot()
@@ -506,6 +516,16 @@ def make_http_handler(store: AudioStore, state: RuntimeState,
         def do_POST(self):
             if self.path == '/video/whep':
                 return self.proxy_whep()
+            if self.path == '/dashboard/weather-test':
+                if self.headers.get('X-EBO-Dashboard') != '1':
+                    return self.send_json(403, {'error': 'dashboard_only'})
+                if supervisor.weather is None:
+                    return self.send_json(200, {'accepted': False, 'error': 'weather_disabled'})
+                try:
+                    return self.send_json(200, {'accepted': True, 'script': supervisor.weather.test_now()})
+                except Exception as exc:
+                    LOG.warning('Weather test failed: %s', exc)
+                    return self.send_json(200, {'accepted': False, 'error': str(exc)[:200]})
             if self.path == '/dashboard/end-rest':
                 if self.headers.get('X-EBO-Dashboard') != '1':
                     return self.send_json(403, {'error': 'dashboard_only'})
@@ -655,6 +675,10 @@ def main():
         threads.append(threading.Thread(target=tracker.run, daemon=True, name='person-tracker'))
         LOG.info('Visual person following enabled')
 
+    if config.weather_enabled:
+        supervisor.weather = WeatherBrief(config, lambda pcm: supervisor.play_prepared(pcm, 'weather'))
+        supervisor.weather.start()
+
     greeter = None
     if config.proactive_greeting:
         greeter = HomecomingGreeter(config, supervisor.greet_homecoming)
@@ -686,6 +710,8 @@ def main():
         tracker.stop()
     if greeter is not None:
         greeter.stop()
+    if supervisor.weather is not None:
+        supervisor.weather.stop()
     capture.stop()
     supervisor.stop()
     httpd.shutdown()

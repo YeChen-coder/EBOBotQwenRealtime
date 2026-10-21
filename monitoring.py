@@ -195,6 +195,8 @@ select{background:var(--card);border:1px solid var(--line);border-radius:6px;pad
       data-en-title="Returns to the dock if it isn't charging; if it already is, just starts the cooldown. It won't follow people during the cooldown, and a restart keeps it.">回充电座并冷却</button>
     <button id="endrest" type="button" data-en="End cooldown"
       title="马上结束冷却，恢复正常跟随" data-en-title="End the cooldown now and resume normal following">结束冷却</button>
+    <button id="weathertest" type="button" data-en="Test weather"
+      title="马上取今天的天气、录音并播一次（每天早上那次照常）" data-en-title="Fetch today's weather, record it and play it once now (the daily morning brief still runs)">试播天气</button>
     <a class="meta" href="http://127.0.0.1:8101/" target="_blank" rel="noopener" data-en="Robot control panel ↗">机器人控制面板 ↗</a>
     <button id="lang" type="button" title="切换语言 / Switch language">English</button>
   </span>
@@ -363,6 +365,19 @@ $('endrest').onclick = async () => {
     if (lastHealth) { lastHealth.tracking_status = 'idle'; lastHealth.tracking_rest_seconds = 0; render(lastHealth); }
   } catch (e) { note(() => T('失败：','Failed: ') + e.message); }
   setTimeout(() => { btn.disabled = false; }, 2000);
+};
+$('weathertest').onclick = async () => {
+  const btn = $('weathertest');
+  btn.disabled = true; note(() => T('正在取天气、录音…（约 15 秒）','Fetching weather and recording… (about 15 s)'));
+  try {
+    const r = await fetch('/dashboard/weather-test', {method: 'POST', headers: {'X-EBO-Dashboard': '1'}});
+    const j = await r.json();
+    note(() => j.accepted ? T('已播：','Played: ') + j.script
+      : j.error === 'weather_disabled' ? T('天气播报没开（EBO_WEATHER_ENABLED）','Weather brief is off (EBO_WEATHER_ENABLED)')
+      : j.error === 'busy' ? T('正在聊天或安静模式，录好了但没播','Busy or in quiet mode: recorded but not played')
+      : T('失败：','Failed: ') + j.error);
+  } catch (e) { note(() => T('失败：','Failed: ') + e.message); }
+  btn.disabled = false;
 };
 $('dockrest').onclick = async () => {
   const btn = $('dockrest');

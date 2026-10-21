@@ -14,6 +14,7 @@ import logging
 import threading
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Callable
 
 import timers
@@ -32,6 +33,8 @@ class HomecomingGreeter:
         self.greet = greet  # greet(人脸名) -> 是否真的开口了
         self.names = tuple(n.strip() for n in config.greet_names.split(',') if n.strip())
         self.start_hour, self.end_hour = parse_hours(config.greet_hours)
+        # 实测：程序跑在多伦多的电脑上，妈妈在国内晚上 7:49 到家，按多伦多早上 7:49 算成“不在迎接时段”
+        self.tz = ZoneInfo(config.home_timezone) if config.home_timezone else None
         self.lock = threading.Lock()
         self.client = None
         # 第一次启用（没有记录）时当作“刚见过”：否则程序一启动，在家的人一出现就被欢迎回家
@@ -48,7 +51,7 @@ class HomecomingGreeter:
         timers.save(self.config.timers_path, self._key(name), now + self.config.greet_away_seconds)
 
     def in_hours(self, now: float) -> bool:
-        hour = datetime.fromtimestamp(now).hour
+        hour = datetime.fromtimestamp(now, self.tz).hour
         return self.start_hour <= hour < self.end_hour
 
     def observe(self, payload: dict, now: float | None = None) -> bool:
@@ -76,7 +79,7 @@ class HomecomingGreeter:
         try:
             greeted = bool(self.greet(name))
             if greeted:
-                tomorrow = datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0)
+                tomorrow = datetime.fromtimestamp(now, self.tz).replace(hour=0, minute=0, second=0, microsecond=0)
                 timers.save(self.config.timers_path, f'greeted:{name}', tomorrow.timestamp() + 86400)
             return greeted
         except Exception as exc:
@@ -106,8 +109,9 @@ class HomecomingGreeter:
         client.connect_async(self.config.mqtt_host, self.config.mqtt_port)
         client.loop_start()
         self.client = client
-        LOG.info('Homecoming greeting enabled for %s (%d-%d h, after %.0f h away)',
-                 ','.join(self.names), self.start_hour, self.end_hour, self.config.greet_away_seconds / 3600)
+        LOG.info('Homecoming greeting enabled for %s (%d-%d h %s, after %.0f h away)',
+                 ','.join(self.names), self.start_hour, self.end_hour, self.config.home_timezone or 'local time',
+                 self.config.greet_away_seconds / 3600)
 
     def stop(self):
         if self.client is not None:

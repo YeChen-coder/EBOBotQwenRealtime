@@ -73,6 +73,16 @@ class Config:
     greet_names: str = '妈妈'
     greet_away_seconds: float = 10800
     greet_hours: str = '11-23'
+    # greet_hours 按家里的时间算。程序跑在别的时区的电脑上时要写（如 Asia/Shanghai），空 = 这台电脑的时间
+    home_timezone: str = ''
+    # 每天早上定时播天气（weather_brief.py），时间按 home_timezone 算
+    weather_enabled: bool = False
+    weather_time: str = '06:00'
+    weather_city: str = '天津'
+    weather_lat: float = 39.1422
+    weather_lon: float = 117.1767
+    weather_name: str = '妈妈'   # 播报开头称呼谁
+    weather_dir: str = '/data/weather'
     greet_context: str = ''  # 家人的背景（工作等），写进迎接提示词；隐私，只放 .env
     voice_wake_enabled: bool = True
 
@@ -203,6 +213,13 @@ class Config:
             'greet_names': 'EBO_GREET_NAMES',
             'greet_away_seconds': 'EBO_GREET_AWAY_SECONDS',
             'greet_hours': 'EBO_GREET_HOURS',
+            'home_timezone': 'EBO_HOME_TIMEZONE',
+            'weather_enabled': 'EBO_WEATHER_ENABLED',
+            'weather_time': 'EBO_WEATHER_TIME',
+            'weather_city': 'EBO_WEATHER_CITY',
+            'weather_lat': 'EBO_WEATHER_LAT',
+            'weather_lon': 'EBO_WEATHER_LON',
+            'weather_name': 'EBO_WEATHER_NAME',
             'greet_context': 'EBO_GREET_CONTEXT',
             'voice_wake_enabled': 'EBO_VOICE_WAKE_ENABLED',
             'whisper_model': 'EBO_WHISPER_MODEL',
