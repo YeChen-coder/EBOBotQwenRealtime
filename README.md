@@ -329,3 +329,31 @@ The fix: in standby, if the whole sentence is only a stock phrase like "谢谢",
 - Every reply now writes a usage line to the log, `Response completed; usage: input …`, so checking the bill no longer involves guesswork.
 - Web search stays on. In the logs, text tokens per reply stayed steady at 1,200–1,350 and never looked like an actual web search happened. Having it on adds a fixed ~300 tokens per reply (the search tool's description), which is acceptable.
 - The new recognition connection is billed per second (¥0.00033/s), only for the speech segments: well under ¥1 a day.
+
+---
+
+
+
+Fixed a few more problems today. A quick look back while I'm at it:
+
+1. Filtering out track noise
+I noticed the transcripts kept showing "嗯嗯" ("mm-hmm") noise. After looking into it, it turned out to be the sound of the robot's tracks. The tracks make quite a racket when they move, and the noise went straight into the microphone. That noise is now filtered out.
+<img width="150" height="392" alt="image" src="https://github.com/user-attachments/assets/835604b0-02aa-4423-9ba5-4dd042969282" />
+
+2. Time zone fix
+I'd already built the feature where it goes to greet my family when they get home from work, but once it went live it seemed to do nothing at all; the robot didn't say a word. I checked and found a time zone problem: the robot is deployed on the other side of the planet, 12 hours apart, and the time zone check was somehow using my local time. So when my family got home from work at 7 or 8 in the evening, the robot thought it was 7 or 8 in the morning, and of course it didn't behave. The time zone now uses local time in China.
+3. Morning weather brief
+Added a scheduled morning weather brief: it calls a weather API, turns the local weather into audio and plays it on a schedule. There's conflict handling here too: if someone is talking at the time, it waits and plays after they finish. Very routine ordering.
+4. Memory architecture pitfall (the big core problem)
+Everything above is small stuff. The real big problem is that the mess here finally blew up.
+
+The approach from the 0-to-1 stage, go fast, get it running first and worry later, "charging headlong to pick a rose petal out of the swamp," really does need to change now that we're in the 1-to-100 stage. When I had Claude Code do the V3 refactor, I told it clearly that memory is two layers (carried over from my other project, Specter). That's also how the earlier OpenAI-based V2 with Frigate worked, and it always worked well.
+
+Then in this V3 refactor, Claude Code forgot all about it. It never mentioned memory, and whenever something came up it just put everything into the prompt in the environment variables. I vaguely felt something was off at the time, but I trusted it too much. I thought it was a deliberate design meant to make the identity information stick better. The blame here is half mine, half its.
+
+Digging in, I found it never used the two-layer memory architecture at all. The folder was created, but no code used it. So on memory, it had gone straight back to the original V1: the robot had no memory at all, and nothing was left once a conversation ended. Time-sensitive states like "not feeling well" were written straight into the prompt in the environment variables, so the robot kept asking about them over and over.
+
+I've now had Claude Code put the two-layer architecture back. From now on, development still needs a spec as the standard to keep things in line. Opus 5.5 is much smarter than me, but I really can't trust it blindly.
+
+4. Takeaways from the Claude Code best practices blog
+Yesterday I finally finished reading Anthropic's Claude Code Best Practices blog post. Anthropic really does have a hacker and engineer spirit, mostly in how it handles control over the context window, giving users a lot of freedom and flexibility. Most of it didn't leave a deep impression on one read, but I did learn one really practical trick: use /btw (by the way) to slip in an instruction without touching the main conversation's context at all. I'm already using /btw to have it check deployment status, see whether something is live, troubleshoot, and check that the day's run is normal. This feature is really great. Reading the docs does pay off.
