@@ -98,6 +98,10 @@ class Conversation:
         self.on_quiet_request = None   # 由 Supervisor 注入：用户让它闭嘴时调用
         self.last_dock_request = -1e9
         self.heard: deque[tuple[float, str]] = deque(maxlen=4)
+        # 记忆（memory.py）：由 Supervisor 注入开场前已经知道的事，会话结束时把这场的逐句记录交回去
+        self.memory_context = ''
+        self.on_session_end = None
+        self.memory_lines: list[tuple[str, str, float]] = []
 
         self.current_response_id = ''
         self.current_audio_buffer = bytearray()
@@ -179,6 +183,8 @@ class Conversation:
     def _instructions(self) -> str:
         name = self.profile.display_name
         text = f'{self.config.instructions}\n当前和你说话的是：{name}。' if name else self.config.instructions
+        if self.memory_context:
+            text += f'\n\n{self.memory_context}\n'
         if self.opening_prompt:
             # response.create 里的 instructions 只管第一句；后面怎么接着聊要放进整场对话的指令里
             text += f'\n这场对话是你主动开始的：{self.opening_prompt}'
@@ -201,6 +207,7 @@ class Conversation:
         self.skip_addressee_once = True
         LOG.info('Opening with wake utterance: %s', turn.text)
         if turn.text:
+            self.memory_lines.append(('user', turn.text, time.time()))
             self.transcripts.append(
                 item_id=turn.item_id,
                 transcript=turn.text,
@@ -406,6 +413,7 @@ class Conversation:
         LOG.info('Assistant said: %s', transcript[:100])
         if transcript:
             self.last_assistant_text = transcript[-200:]
+            self.memory_lines.append(('assistant', transcript, time.time()))
             # 说到做到：模型答应了“我这就回去（充电）”，就真的回充（实测用户说“回去吧”时它答应了却没动）
             if (self.on_dock_request and says_going_to_dock(transcript)
                     and time.monotonic() - self.last_dock_request > 60):
@@ -427,6 +435,7 @@ class Conversation:
         LOG.info('User said: %s', transcript)
         if transcript.strip():
             self.heard.append((time.monotonic(), transcript.strip()))
+            self.memory_lines.append(('user', transcript.strip(), time.time()))
             self.transcripts.append(
                 item_id=f'turn_{uuid.uuid4().hex[:24]}',
                 transcript=transcript,
@@ -499,3 +508,8 @@ class Conversation:
             input_speech_active=False,
         )
         LOG.info('Conversation session ended: %s', self.session_id)
+        if self.on_session_end is not None:
+            try:
+                self.on_session_end(self)
+            except Exception as exc:
+                LOG.warning('Cannot hand the session to memory: %s', exc)

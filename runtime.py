@@ -22,6 +22,7 @@ from ebo_transport import AudioStore, AssistantOutputStore, EboAPI, Speaker, Tra
 from monitoring import (DASHBOARD_HTML, LogBuffer, add_ice_host, mjpeg_url,
                         recent_conversation, setup_logging, whep_url)
 from greeter import HomecomingGreeter
+from memory import MemoryManager, SessionRecord
 from weather_brief import WeatherBrief
 from person_tracker import PersonTracker
 from scan_detector import ScanDetector
@@ -52,6 +53,8 @@ class Supervisor:
         self.wake = StandbyVoice(config, state, self.voice_eligible, self.accept_voice)
         self.tracker = None  # main() 在启用视觉跟随时设置
         self.weather = None  # main() 在启用早上天气播报时设置
+        self.memory: MemoryManager | None = None   # main() 设置；全家一份的记忆
+        self.greeter: HomecomingGreeter | None = None
         self.wake.on_quiet_request = self.handle_quiet_request
         self.wake.on_dock_request = self.handle_dock_request
 
@@ -105,8 +108,11 @@ class Supervisor:
         if profile is None or self.wake.quiet_active():
             return False
         name = profile.display_name
-        # 家人的工作等背景属于隐私，放在 .env（EBO_GREET_CONTEXT），不进代码仓库
-        background = f'关于{name}：{self.config.greet_context}\n' if self.config.greet_context else ''
+        # 她的情况来自记忆（固定事实在 data/memory/seed.json，隐私，不进代码仓库）；
+        # 这一句的 instructions 会替换整场的，所以要单独带上。EBO_GREET_CONTEXT 仍可写额外的提醒
+        about = self.memory.context(about=name) if self.memory is not None else ''
+        background = (f'{about}\n' if about else '') + (
+            f'关于{name}：{self.config.greet_context}\n' if self.config.greet_context else '')
         prompt = (
             f'{name}刚刚下班回到家，现在就在你面前。你要主动开口，像家里盼着她回来的小伙伴一样，'
             f'开心地迎接她，开启一段聊天，而不是打完招呼就结束。\n'
@@ -140,6 +146,16 @@ class Supervisor:
                 return False
             self.speaker.finish_stream(pcm, f'{label}_{int(time.time())}')
             return True
+
+    def session_ended(self, conversation: Conversation):
+        """把这场对话交给记忆的第一层（后台写笔记，不耽误下一场）"""
+        if self.memory is None or not conversation.memory_lines:
+            return
+        end = conversation.memory_lines[-1][2]
+        faces = (self.greeter.faces_between(conversation.session_started_at - 600, end + 600)
+                 if self.greeter is not None else [])
+        self.memory.session_ended(SessionRecord(conversation.session_id, conversation.session_started_at,
+                                                conversation.trigger, list(conversation.memory_lines), faces))
 
     def voice_eligible(self) -> bool:
         snapshot = self.state.snapshot()
@@ -184,6 +200,9 @@ class Supervisor:
             conversation.on_dock_request = self.handle_dock_request
             conversation.on_quiet_request = self.handle_quiet_request
             conversation.local_transcribe = self.wake.transcriber.transcribe
+            if self.memory is not None:
+                conversation.memory_context = self.memory.context()
+                conversation.on_session_end = self.session_ended
 
             # 唤醒句转录期间用户可能还在说：排队的后续语句和正在说的半句
             # 都交给会话，放在实时音频之前送达，不能被 wake.reset() 丢掉。
@@ -430,6 +449,11 @@ def make_http_handler(store: AudioStore, state: RuntimeState,
                     after = 0
                 return self.send_json(200, log_buffer.since(after))
 
+            if path == '/memory':
+                if supervisor.memory is None:
+                    return self.send_json(200, {'enabled': False})
+                return self.send_json(200, {'enabled': True, **supervisor.memory.snapshot()})
+
             if path == '/conversation':
                 return self.send_json(200, recent_conversation(
                     Path(config.transcript_path), Path(config.assistant_transcript_path)))
@@ -516,6 +540,23 @@ def make_http_handler(store: AudioStore, state: RuntimeState,
         def do_POST(self):
             if self.path == '/video/whep':
                 return self.proxy_whep()
+            if self.path in ('/dashboard/memory-forget', '/dashboard/memory-consolidate'):
+                if self.headers.get('X-EBO-Dashboard') != '1':
+                    return self.send_json(403, {'error': 'dashboard_only'})
+                if supervisor.memory is None:
+                    return self.send_json(200, {'accepted': False, 'error': 'memory_disabled'})
+                if self.path == '/dashboard/memory-consolidate':
+                    supervisor.memory.consolidate_soon()
+                    return self.send_json(200, {'accepted': True})
+                try:
+                    length = min(int(self.headers.get('Content-Length') or 0), 4096)
+                    item_id = str(json.loads(self.rfile.read(length) or b'{}').get('id', ''))
+                except (ValueError, AttributeError):
+                    return self.send_json(400, {'error': 'bad_request'})
+                forgotten = supervisor.memory.store.forget(item_id)
+                if forgotten:
+                    LOG.info('Dashboard: forgot memory item %s', item_id)
+                return self.send_json(200, {'accepted': forgotten, 'error': '' if forgotten else 'not_found_or_pinned'})
             if self.path == '/dashboard/weather-test':
                 if self.headers.get('X-EBO-Dashboard') != '1':
                     return self.send_json(403, {'error': 'dashboard_only'})
@@ -679,10 +720,15 @@ def main():
         supervisor.weather = WeatherBrief(config, lambda pcm: supervisor.play_prepared(pcm, 'weather'))
         supervisor.weather.start()
 
+    if config.memory_enabled:
+        supervisor.memory = MemoryManager(config, state, is_idle=lambda: supervisor.active is None)
+        supervisor.memory.start()
+
     greeter = None
     if config.proactive_greeting:
         greeter = HomecomingGreeter(config, supervisor.greet_homecoming)
         greeter.start_mqtt()
+        supervisor.greeter = greeter
 
     stop = threading.Event()
 
@@ -712,6 +758,8 @@ def main():
         greeter.stop()
     if supervisor.weather is not None:
         supervisor.weather.stop()
+    if supervisor.memory is not None:
+        supervisor.memory.stop()
     capture.stop()
     supervisor.stop()
     httpd.shutdown()

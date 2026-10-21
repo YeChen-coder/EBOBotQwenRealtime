@@ -179,6 +179,11 @@ select,label{font:inherit;color:inherit}
 select{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:1px 4px}
 .empty{color:var(--muted);font-size:13px}
 .errors .row span:last-child{color:var(--bad)}
+.mem{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:4px 16px}
+.mem h3{grid-column:1/-1;font-size:13px;margin:8px 0 2px;color:var(--muted);font-weight:600}
+.mem .item{display:flex;gap:8px;align-items:baseline;padding:3px 0;border-top:1px dashed var(--line)}
+.mem .item .who{flex-shrink:0;font-weight:600}.mem .item .txt{flex:1;overflow-wrap:anywhere}
+.mem .item small{color:var(--muted);white-space:nowrap}
 #lang{font-weight:600}
 </style>
 </head>
@@ -219,6 +224,10 @@ select{background:var(--card);border:1px solid var(--line);border-radius:6px;pad
     <section class="card"><h2 data-en="Recent conversation">最近对话</h2><div class="chat" id="chat"></div></section>
   </div>
   <div class="grid" id="cards"></div>
+  <section class="card" style="margin-top:12px"><h2><span data-en="Memory">记忆</span> <span id="memstate" class="badge idle">…</span>
+    <span class="tools"><span class="meta" id="memmeta"></span><span class="meta" id="memmsg"></span>
+    <button id="memcons" type="button" data-en="Consolidate now" title="把还没整理的对话笔记合并进记忆" data-en-title="Merge the pending conversation notes into memory">立即整理</button></span></h2>
+    <div class="mem" id="mem"></div></section>
   <section class="card" style="margin-top:12px"><h2><span data-en="Logs">日志</span>
     <span class="tools"><select id="level"><option value="INFO" data-en="All">全部</option><option value="WARNING" data-en="Warnings and above">警告及以上</option><option value="ERROR" data-en="Errors only">仅错误</option></select>
     <label><input type="checkbox" id="follow" checked> <span data-en="Auto-scroll">自动滚动</span></label></span></h2>
@@ -332,6 +341,66 @@ function render(h) {
   ].join('');
 }
 
+// ---- 记忆卡片 ----
+let lastMemory = null, memTick = 0;
+const KIND = () => ({fact:T('事实','fact'), preference:T('喜好','preference'), routine:T('作息','routine'), relation:T('关系','relation'),
+  plan:T('计划','plan'), event:T('事情','event'), concern:T('关心','concern'), mood:T('心情','mood')});
+const STATUS = () => ({open:[T('还没问','not asked yet'),'warn'], asked:[T('已问过','asked'),'info'], resolved:[T('已好了','resolved'),'ok']});
+const md = d => d ? d.slice(5) : '';
+function renderMemory(m) {
+  const box = $('mem');
+  if (!m || !m.enabled) { $('memstate').className = 'badge idle'; $('memstate').textContent = T('未启用','Disabled'); box.innerHTML = ''; return; }
+  const h = lastHealth || {};
+  const busy = {writing_notes:T('写笔记中','Writing notes'), consolidating:T('整理中','Consolidating')}[h.memory_status];
+  const err = h.memory_status === 'error';
+  $('memstate').className = 'badge ' + (err ? 'bad' : busy ? 'info' : 'ok');
+  $('memstate').textContent = err ? T('出错','Error') : busy || T(`${m.items.length} 条`, `${m.items.length} items`);
+  $('memmeta').textContent = T(`待整理笔记 ${m.notes_waiting} 条 · 上次整理 ${ago(m.consolidated_at)}`,
+                               `${m.notes_waiting} notes waiting · last consolidated ${ago(m.consolidated_at)}`)
+    + (err && h.memory_last_error ? ' · ' + h.memory_last_error : '');
+  const groups = [['permanent', T('永久（身份、家人）','Permanent (identity, family)')], ['long', T('长期（几周到几个月）','Long-term (weeks to months)')],
+                  ['short', T('短期（这两天）','Short-term (these days)')]];
+  const kinds = KIND(), statuses = STATUS();
+  const html = groups.map(([tier, title]) => {
+    const items = m.items.filter(i => i.tier === tier);
+    if (!items.length) return '';
+    return `<h3>${title}</h3>` + items.map(i => {
+      const st = statuses[i.status];
+      const until = i.pinned ? T('固定','pinned') : i.expires_on ? T('到 ','until ') + md(i.expires_on) : '';
+      return `<div class="item" title="${esc(i.evidence ? T('原话：','Quote: ') + i.evidence : '')}"><span class="who">${esc(i.about)}</span>` +
+        `<span class="txt">${esc(i.text)} ${st ? tag(st[0] + (i.status === 'asked' && i.asked_on ? ' ' + md(i.asked_on) : ''), st[1]) : ''}</span>` +
+        `<small>${esc(kinds[i.kind] || i.kind)} · ${until}</small>` +
+        (i.pinned ? `<small title="${esc(T('改 data/memory/seed.json','Edit data/memory/seed.json'))}">🔒</small>`
+                  : `<button type="button" data-forget="${esc(i.id)}" title="${esc(T('删掉这条（记错了）','Delete this item (it is wrong)'))}">${T('删除','Delete')}</button>`) + '</div>';
+    }).join('');
+  }).join('');
+  box.innerHTML = html || `<div class="empty">${T('还没有记忆','No memories yet')}</div>`;
+}
+async function loadMemory() {
+  try { lastMemory = await (await fetch('/memory')).json(); renderMemory(lastMemory); } catch (e) {}
+}
+$('mem').onclick = async e => {
+  const id = e.target.dataset && e.target.dataset.forget;
+  if (!id) return;
+  const text = e.target.closest('.item').querySelector('.txt').textContent.trim();
+  if (!confirm(T('删掉这条记忆？', 'Delete this memory?') + ' ' + text)) return;
+  e.target.disabled = true;
+  try {
+    const r = await fetch('/dashboard/memory-forget', {method: 'POST', headers: {'X-EBO-Dashboard': '1', 'Content-Type': 'application/json'}, body: JSON.stringify({id})});
+    const j = await r.json();
+    $('memmsg').textContent = j.accepted ? T('已删除','Deleted') : T('删不了（固定事实请改 seed.json）','Cannot delete (edit seed.json for pinned facts)');
+  } catch (err) { $('memmsg').textContent = T('失败：','Failed: ') + err.message; }
+  loadMemory();
+};
+$('memcons').onclick = async () => {
+  const btn = $('memcons'); btn.disabled = true;
+  try {
+    await fetch('/dashboard/memory-consolidate', {method: 'POST', headers: {'X-EBO-Dashboard': '1'}});
+    $('memmsg').textContent = T('已开始整理，约半分钟','Consolidating, about 30 s');
+  } catch (e) { $('memmsg').textContent = T('失败：','Failed: ') + e.message; }
+  setTimeout(() => { btn.disabled = false; loadMemory(); }, 30000);
+};
+
 function renderChat(items) {
   const box = $('chat');
   if (!items.length) { box.innerHTML = `<div class="empty">${T('还没有对话','No conversation yet')}</div>`; return; }
@@ -400,6 +469,7 @@ async function tick() {
       .map(p => p.then(r => r.json())));
     failures = 0;
     lastHealth = h; lastChat = c;
+    if (memTick++ % 5 === 0) loadMemory();
     render(h);
     if (l.length) { logs = logs.concat(l).slice(-800); lastSeq = l[l.length - 1].seq; renderLogs(); }
     renderChat(c);
@@ -514,6 +584,7 @@ function applyLang() {
   if (lastChat) renderChat(lastChat); else $('chat').innerHTML = `<div class="empty">${T('还没有对话','No conversation yet')}</div>`;
   if (dockNote && !(lastHealth && lastHealth.tracking_status === 'resting')) $('dockmsg').textContent = dockNote();
   renderLogs();
+  renderMemory(lastMemory);
 }
 $('lang').onclick = () => {
   lang = lang === 'en' ? 'zh' : 'en';

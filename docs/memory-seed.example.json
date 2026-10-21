@@ -1,0 +1,8 @@
+{
+ "_说明": "复制到 data/memory/seed.json 再改（data/ 不进 git）。这些是家人亲自写的固定事实：猫猫每场对话都知道，自己不会改也不会删；改完重启助手生效。about 写关于谁，kind 可以是 fact / relation / preference / routine。",
+ "items": [
+  {"id": "seed_home", "about": "家里", "kind": "fact", "text": "这个家在某某城市，猫猫住在爸爸妈妈家里"},
+  {"id": "seed_mom_job", "about": "妈妈", "kind": "fact", "text": "妈妈是中学老师"},
+  {"id": "seed_kid", "about": "孩子的名字", "kind": "relation", "text": "孩子的名字是爸爸妈妈的孩子，现在在外地"}
+ ]
+}

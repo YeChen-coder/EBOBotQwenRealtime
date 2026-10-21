@@ -37,6 +37,7 @@ class HomecomingGreeter:
         self.tz = ZoneInfo(config.home_timezone) if config.home_timezone else None
         self.lock = threading.Lock()
         self.client = None
+        self.seen: dict[str, float] = {}   # 最近认出的人脸 -> 时间；记忆用它猜这场对话是谁在说
         # 第一次启用（没有记录）时当作“刚见过”：否则程序一启动，在家的人一出现就被欢迎回家
         for name in self.names:
             if not timers.has(config.timers_path, self._key(name)):
@@ -50,6 +51,9 @@ class HomecomingGreeter:
         # 存的是“到这个时刻为止都算刚见过”，用 timers.remaining 判断
         timers.save(self.config.timers_path, self._key(name), now + self.config.greet_away_seconds)
 
+    def faces_between(self, start: float, end: float) -> list[tuple[str, float]]:
+        return [(name, at) for name, at in list(self.seen.items()) if start <= at <= end]
+
     def in_hours(self, now: float) -> bool:
         hour = datetime.fromtimestamp(now, self.tz).hour
         return self.start_hour <= hour < self.end_hour
@@ -62,6 +66,8 @@ class HomecomingGreeter:
         if event.get('label') != 'person' or not isinstance(sub, (list, tuple)) or len(sub) < 2:
             return False
         name, score = sub[0], sub[1]
+        if isinstance(score, (int, float)) and score >= self.config.min_face_score and isinstance(name, str):
+            self.seen[name] = now
         if name not in self.names or not isinstance(score, (int, float)) or score < self.config.min_face_score:
             return False
         with self.lock:

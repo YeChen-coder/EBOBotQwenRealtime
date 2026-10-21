@@ -140,11 +140,16 @@ class Config:
     transcript_path: str = '/data/transcripts.jsonl'
     output_audio_dir: str = '/data/replies'
     assistant_transcript_path: str = '/data/assistant_outputs.jsonl'
-    memory_root: str = '/data/memory-v2'
+    # 全家一份的记忆（memory.py）：memory.json / notes.json / seed.json（seed 是家人自己写的固定事实）
+    memory_dir: str = '/data/memory'
     assistant_control_path: str = ''
 
     # 其他配置
-    memory_max_chars: int = 6000
+    memory_enabled: bool = True
+    memory_note_model: str = 'qwen-plus'          # 第一层：每场对话后写笔记
+    memory_model: str = 'qwen3-max,qwen-max'       # 第二层：整理，按顺序试（账号里没有的跳过）
+    memory_consolidate_after: int = 4              # 攒够几条笔记就整理
+    memory_context_chars: int = 2500               # 放进 instructions 的上限（每轮都重复计费）
     media_stale_after_seconds: float = 20
     media_startup_grace_seconds: float = 90
     instructions: str = '你是家里的 EBO 机器人助手。用自然、简洁、温暖的中文交谈。没有把握就明确说不知道。'
@@ -256,9 +261,13 @@ class Config:
             'transcript_path': 'EBO_TRANSCRIPT_PATH',
             'output_audio_dir': 'EBO_OUTPUT_AUDIO_DIR',
             'assistant_transcript_path': 'EBO_ASSISTANT_TRANSCRIPT_PATH',
-            'memory_root': 'EBO_MEMORY_ROOT',
+            'memory_dir': 'EBO_MEMORY_DIR',
+            'memory_enabled': 'EBO_MEMORY_ENABLED',
+            'memory_note_model': 'EBO_MEMORY_NOTE_MODEL',
+            'memory_model': 'EBO_MEMORY_MODEL',
+            'memory_consolidate_after': 'EBO_MEMORY_CONSOLIDATE_AFTER',
             'assistant_control_path': 'EBO_ASSISTANT_CONTROL_PATH',
-            'memory_max_chars': 'EBO_REALTIME_MEMORY_MAX_CHARS',
+            'memory_context_chars': 'EBO_MEMORY_CONTEXT_CHARS',
             'media_stale_after_seconds': 'EBO_MEDIA_STALE_AFTER_SECONDS',
             'media_startup_grace_seconds': 'EBO_MEDIA_STARTUP_GRACE_SECONDS',
             'instructions': 'EBO_ASSISTANT_INSTRUCTIONS',
@@ -341,8 +350,8 @@ class Config:
         if not 0 < self.vad_threshold < 1:
             raise ValueError('VAD threshold out of range')
 
-        if not Path(self.memory_root).is_absolute():
-            raise ValueError('EBO_MEMORY_ROOT must be absolute path')
+        if not Path(self.memory_dir).is_absolute():
+            raise ValueError('EBO_MEMORY_DIR must be absolute path')
 
     def profile(self, user_id: str) -> Profile:
         """获取用户配置"""
@@ -351,8 +360,6 @@ class Config:
                 return profile
         raise ValueError('unknown_user')
 
-    def memory_paths(self, user_id: str) -> tuple[Path, Path]:
-        """获取用户记忆文件路径"""
-        self.profile(user_id)  # 验证用户存在
-        directory = Path(self.memory_root) / user_id
-        return directory / 'sessions.json', directory / 'long_term.json'
+    @property
+    def memory_models(self) -> tuple[str, ...]:
+        return tuple(m.strip() for m in self.memory_model.split(',') if m.strip())
