@@ -332,11 +332,12 @@ class Conversation:
         respond = False
         try:
             text = await self._turn_transcript(turn_pcm, transcript)
-            self._record_user_text(text)
             if not valid_wake_text(text):
+                # 不记进对话记录和上下文：多半是履带声等噪音被识别成的“嗯。”
                 LOG.info('Ignored turn without real speech: %r', text)
                 self.state.increment('input_turns_ignored')
                 return
+            self._record_user_text(text)
             skip_check, self.skip_addressee_once = self.skip_addressee_once, False
             if (text and self.addressee is not None and not skip_check
                     and not has_wake_word(text, self.wake_words)):

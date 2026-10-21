@@ -1,6 +1,9 @@
 """EBO 麦克风是 24 kHz s16le；Qwen3.8 输入和 Whisper 都要求 16 kHz。"""
 from __future__ import annotations
 
+import threading
+import time
+
 import numpy as np
 import webrtcvad
 
@@ -28,6 +31,58 @@ def is_speech_24k(vad: webrtcvad.Vad, frame: bytes) -> bool:
     return vad.is_speech(downsampled, 8000)
 
 
+def frame_rms(frame: bytes) -> float:
+    samples = np.frombuffer(frame, dtype='<i2').astype(np.float32)
+    return float(np.sqrt(np.mean(samples * samples))) if samples.size else 0.0
+
+
+class MotionClock:
+    """机器人什么时候在动（履带声很大）。所有动作命令都经过 EboTransport.command，在那里登记。"""
+
+    def __init__(self):
+        self._until = 0.0
+        self._lock = threading.Lock()
+
+    def mark(self, seconds: float):
+        with self._lock:
+            self._until = max(self._until, time.monotonic() + seconds)
+
+    def active(self) -> bool:
+        return time.monotonic() < self._until
+
+
+MOTION = MotionClock()
+
+
+class MotionNoiseGate:
+    """机器人动的时候，履带噪音会被 VAD 当成人声，被识别成一串“嗯。”。
+    动起来后先听 0.2 秒学会履带噪音有多响，之后只有明显比它响（约 6 dB）的声音才算有人说话；
+    停下来就不再把关，照常听。"""
+
+    RATIO = 2.0         # 声音幅度要到履带噪音的 2 倍
+    LEARN_FRAMES = 10   # 10 x 20 ms
+    ALPHA = 0.05
+
+    def __init__(self, motion: MotionClock = MOTION):
+        self.motion = motion
+        self.noise = 0.0
+        self.learned = 0
+
+    def voiced(self, vad_voiced: bool, frame: bytes) -> bool:
+        if not self.motion.active():
+            self.learned = 0
+            return vad_voiced
+        rms = frame_rms(frame)
+        if self.learned < self.LEARN_FRAMES:
+            self.noise = rms if self.learned == 0 else (self.noise * self.learned + rms) / (self.learned + 1)
+            self.learned += 1
+            return False
+        if vad_voiced and rms > self.noise * self.RATIO:
+            return True
+        self.noise += self.ALPHA * (rms - self.noise)
+        return False
+
+
 class EndOfTurnDetector:
     """会话中的本地 VAD：说过足够长的话、随后静音达到阈值 -> 一轮结束。"""
 
@@ -35,6 +90,7 @@ class EndOfTurnDetector:
         self.vad = webrtcvad.Vad(vad_mode)
         self.silence_frames = silence_frames
         self.min_voiced_frames = min_voiced_frames
+        self.gate = MotionNoiseGate()
         self._pending = bytearray()
         self.reset()
 
@@ -63,7 +119,7 @@ class EndOfTurnDetector:
         while len(self._pending) >= FRAME_BYTES_24K:
             frame = bytes(self._pending[:FRAME_BYTES_24K])
             del self._pending[:FRAME_BYTES_24K]
-            voiced = is_speech_24k(self.vad, frame)
+            voiced = self.gate.voiced(is_speech_24k(self.vad, frame), frame)
             any_voiced |= voiced
             if voiced:
                 self.voiced += 1

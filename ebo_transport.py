@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib import request
 import websocket
+from audio_utils import MOTION
 from config import Config
 from state import RuntimeState
 LOG = logging.getLogger("ebo-transport")
@@ -27,6 +28,21 @@ RECENT_METRICS_LIMIT = 50
 def _flag(value: object) -> bool:
     return value is True or str(value).lower() == "true"
 
+
+
+def motion_seconds(suffix: str, payload: str) -> float:
+    """这条命令会让机器人动多久（含停稳的余量）；不会动的命令返回 0。"""
+    if suffix == "dock":
+        return 45.0  # 自己找充电座，通常半分钟内
+    try:
+        data = json.loads(payload) if payload else {}
+    except ValueError:
+        return 0.0
+    if suffix == "move/vector":
+        return float(data.get("hold") or 0.5) + 0.8
+    if suffix == "cmd" and data.get("id") == 103001:  # 原地转
+        return 3.0
+    return 0.0
 
 class EboAPI:
     def __init__(self, config: Config, state: RuntimeState) -> None:
@@ -63,6 +79,7 @@ class EboAPI:
         raise ValueError("Robot missing from Engine audio health")
 
     def command(self, suffix: str, payload: str = "") -> None:
+        """动作命令发出后登记“正在动”，麦克风那边据此滤掉履带噪音（见 audio_utils.MotionNoiseGate）"""
         body = json.dumps(
             {"node": self.config.ebo_node, "suffix": suffix, "payload": str(payload)}
         ).encode()
@@ -78,6 +95,9 @@ class EboAPI:
         with request.urlopen(req, timeout=10) as response:
             if response.status >= 400:
                 raise RuntimeError(f"EBO command {suffix} returned HTTP {response.status}")
+        seconds = motion_seconds(suffix, payload)
+        if seconds:
+            MOTION.mark(seconds)
 
     def robot_state(self) -> dict[str, object]:
         req = request.Request(

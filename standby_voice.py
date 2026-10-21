@@ -14,7 +14,7 @@ import webrtcvad
 import timers
 import wake_match
 from addressee import AddresseeClassifier, may_be_dock_request, may_be_quiet_request
-from audio_utils import FRAME_BYTES_24K, is_speech_24k, pcm16k_to_float, resample_24k_to_16k
+from audio_utils import FRAME_BYTES_24K, MotionNoiseGate, is_speech_24k, pcm16k_to_float, resample_24k_to_16k
 
 LOG = logging.getLogger('ebo-standby-voice')
 
@@ -28,6 +28,13 @@ RECENT_CONTEXT_SECONDS = 60
 REPEATED = re.compile(r'(.{1,10}?)\1{2,}')
 
 FILLER_WORDS = {'嗯嗯', '啊啊', '哦哦', '呃呃', '喵喵', '哈哈', '呵呵'}
+# 只有语气词（“嗯。”“嗯嗯嗯”“啊”“呃……”）：多半是履带声或别的噪音被识别出来的，一律当没听到
+INTERJECTIONS = set('嗯恩啊阿哦噢喔呃额唔哼嘿诶欸哎唉呀嗷哈呵')
+
+
+def is_filler(text: str) -> bool:
+    compact = compact_text(text)
+    return bool(compact) and all(c in INTERJECTIONS for c in compact)
 
 
 @dataclass(frozen=True)
@@ -57,7 +64,7 @@ def compact_text(text: str) -> str:
 
 def valid_wake_text(text: str, wake_words: tuple[str, ...] = ()) -> bool:
     compact = compact_text(text)
-    if len(compact) < 2 or compact in FILLER_WORDS or not actionable_transcript(text):
+    if len(compact) < 2 or compact in FILLER_WORDS or is_filler(text) or not actionable_transcript(text):
         return False
     # Whisper 典型幻觉：同一短语重复好几遍（实测“做一件事做一件事做一件事”把机器人唤醒了）
     if REPEATED.fullmatch(compact):
@@ -76,6 +83,7 @@ class SpeechSegmenter:
     def __init__(self, vad=None, silence_frames: int = 45):
         self.vad = vad or webrtcvad.Vad(2)
         self.silence_frames = silence_frames  # 45 帧 x 20 ms = 900 ms
+        self.gate = MotionNoiseGate()
         self.reset()
 
     def reset(self):
@@ -95,7 +103,7 @@ class SpeechSegmenter:
         while len(self._pending) >= FRAME_BYTES_24K:
             frame = bytes(self._pending[:FRAME_BYTES_24K])
             del self._pending[:FRAME_BYTES_24K]
-            voiced = is_speech_24k(self.vad, frame)
+            voiced = self.gate.voiced(is_speech_24k(self.vad, frame), frame)
             if not self.chunks:
                 self.preroll.append(frame)
                 if not voiced:
