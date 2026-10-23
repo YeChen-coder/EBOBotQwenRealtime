@@ -14,6 +14,15 @@ from pypinyin import lazy_pinyin
 ALIASES = {
     '猫猫': ('猫咪', '小猫', '喵喵'),
     '小朋友': ('小盆友',),
+    # Whisper 偶尔把“狗狗”写成英文；“小机器人”说快了常被截成“小机器”
+    '狗狗': ('gogo',),
+    '小机器人': ('小机器',),
+}
+
+# 读音只差一点、但本身是常用词的：不算叫它（妈妈是老师，“高二”“勾股”在家里很常见）
+CONFUSABLE = {
+    '狗儿': ('高二', '高儿', '够二'),
+    '狗狗': ('勾股', '够格'),
 }
 
 _INITIALS = (('zh', 'z'), ('ch', 'c'), ('sh', 's'))
@@ -64,7 +73,7 @@ def matches(text: str, wake_words: tuple[str, ...]) -> bool:
     spoken = tuple(_norm(s) for s in lazy_pinyin(chars))
     for word in wake_words:
         # 别名只认原字：读音放宽到别名上太宽（实测“毛衣”“猫是”都和“猫咪”只差一个字母）
-        if any(alias in chars for alias in ALIASES.get(word, ())):
+        if any(alias in compact for alias in ALIASES.get(word, ())):
             return True
         target = _syllables(word)
         k = len(target)
@@ -72,6 +81,6 @@ def matches(text: str, wake_words: tuple[str, ...]) -> bool:
             window = spoken[start:start + k]
             dists = [_lev(a, b) for a, b in zip(window, target)]
             # 每个字最多差一点，整个词只允许差一处
-            if max(dists) <= 1 and sum(dists) <= 1:
+            if max(dists) <= 1 and sum(dists) <= 1 and chars[start:start + k] not in CONFUSABLE.get(word, ()):
                 return True
     return False
