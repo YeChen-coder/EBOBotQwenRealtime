@@ -195,6 +195,8 @@ select{background:var(--card);border:1px solid var(--line);border-radius:6px;pad
   <span class="meta" id="meta"></span>
   <span style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
     <span class="meta" id="dockmsg"></span>
+    <button id="wakebtn" type="button" data-en="Start conversation"
+      title="不用说唤醒词，直接开始一场对话；它会先打个招呼" data-en-title="Start a conversation without the wake word; it says hello first">唤醒对话</button>
     <button id="dockrest" type="button" data-en="Dock &amp; cool down"
       title="不在充电座就回去；已在充电就只开始冷却。冷却期间看到人也不追，重启程序也不会丢"
       data-en-title="Returns to the dock if it isn't charging; if it already is, just starts the cooldown. It won't follow people during the cooldown, and a restart keeps it.">回充电座并冷却</button>
@@ -447,6 +449,20 @@ $('weathertest').onclick = async () => {
       : T('失败：','Failed: ') + j.error);
   } catch (e) { note(() => T('失败：','Failed: ') + e.message); }
   btn.disabled = false;
+};
+$('wakebtn').onclick = async () => {
+  const btn = $('wakebtn');
+  btn.disabled = true; note(() => T('正在唤醒…','Waking up…'));
+  try {
+    const r = await fetch('/dashboard/session-start', {method: 'POST', headers: {'X-EBO-Dashboard': '1'}});
+    const j = await r.json();
+    note(() => j.accepted ? T('已唤醒，它会先打个招呼，直接说话就行','Awake: it will say hello, then just talk')
+      : j.error === 'session_busy' ? T('已经在对话中了','Already in a conversation')
+      : j.error === 'assistant_disabled' ? T('助手已暂停','Assistant is paused')
+      : j.error === 'media_not_ready' ? T('麦克风或音频还没准备好','Microphone or audio not ready yet')
+      : T('失败：','Failed: ') + j.error);
+  } catch (e) { note(() => T('失败：','Failed: ') + e.message); }
+  setTimeout(() => { btn.disabled = false; }, 3000);
 };
 $('dockrest').onclick = async () => {
   const btn = $('dockrest');

@@ -17,12 +17,20 @@ ALIASES = {
     # Whisper 偶尔把“狗狗”写成英文；“小机器人”说快了常被截成“小机器”
     '狗狗': ('gogo',),
     '小机器人': ('小机器',),
+    # “小人儿”的“儿”很轻，语音识别几乎总是只写“小人”
+    '小人儿': ('小人',),
 }
+
+# 含别名、但说的不是它的词：先去掉再找别名（电视剧里“卑鄙小人”很常见）
+ALIAS_EXCLUDE = ('卑鄙小人', '阴险小人', '奸诈小人', '势利小人', '真小人', '伪小人', '小人物', '小人书',
+                 '小人国', '小人得志', '小人之心', '防小人', '犯小人', '小人长戚戚', '远小人', '是小人', '个小人', '那小人', '这小人')
 
 # 读音只差一点、但本身是常用词的：不算叫它（妈妈是老师，“高二”“勾股”在家里很常见）
 CONFUSABLE = {
     '狗儿': ('高二', '高儿', '够二'),
     '狗狗': ('勾股', '够格'),
+    # “我的妈呀”是感叹；“大妈”是别人；“马马虎虎”
+    '妈妈': ('妈呀', '大妈', '马马', '码码'),
 }
 
 _INITIALS = (('zh', 'z'), ('ch', 'c'), ('sh', 's'))
@@ -73,7 +81,10 @@ def matches(text: str, wake_words: tuple[str, ...]) -> bool:
     spoken = tuple(_norm(s) for s in lazy_pinyin(chars))
     for word in wake_words:
         # 别名只认原字：读音放宽到别名上太宽（实测“毛衣”“猫是”都和“猫咪”只差一个字母）
-        if any(alias in compact for alias in ALIASES.get(word, ())):
+        stripped = compact
+        for phrase in ALIAS_EXCLUDE:
+            stripped = stripped.replace(phrase, '')
+        if any(alias in stripped for alias in ALIASES.get(word, ())):
             return True
         target = _syllables(word)
         k = len(target)

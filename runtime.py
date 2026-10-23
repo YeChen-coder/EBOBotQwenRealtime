@@ -147,6 +147,18 @@ class Supervisor:
             self.speaker.finish_stream(pcm, f'{label}_{int(time.time())}')
             return True
 
+    def start_from_dashboard(self) -> dict:
+        """看板“唤醒对话”：不用说唤醒词，直接开一场对话；它先打个招呼，让人知道它醒了。"""
+        prompt = ('有人刚在看板上把你叫醒了，想跟你说话。先简短地打个招呼，一句话就好'
+                  '（比如“我在呢，想聊点什么？”），然后等对方说。')
+        try:
+            started = self.start('guest', 'dashboard', opening_prompt=prompt)
+        except ValueError as exc:
+            return {'accepted': False, 'error': str(exc)}
+        if started:
+            LOG.info('Dashboard: conversation started by hand')
+        return {'accepted': started, 'error': None if started else 'session_busy'}
+
     def session_ended(self, conversation: Conversation):
         """把这场对话交给记忆的第一层（后台写笔记，不耽误下一场）"""
         if self.memory is None or not conversation.memory_lines:
@@ -173,8 +185,7 @@ class Supervisor:
     def start(self, user_id: str = 'mother', trigger: str = 'manual',
               initial_turn: VoiceTurn | None = None, opening_prompt: str = '') -> bool:
         """启动新会话"""
-        profile = (GUEST_PROFILE if user_id == 'guest' and trigger == 'voice'
-                   else self.config.profile(user_id))
+        profile = GUEST_PROFILE if user_id == 'guest' else self.config.profile(user_id)
 
         with self.lock:
             if not self.enabled:
@@ -573,6 +584,10 @@ def make_http_handler(store: AudioStore, state: RuntimeState,
                 if supervisor.tracker is None:
                     return self.send_json(200, {'accepted': False, 'error': 'tracking_disabled'})
                 return self.send_json(200, {'accepted': True, 'was_resting': supervisor.tracker.end_rest()})
+            if self.path == '/dashboard/session-start':
+                if self.headers.get('X-EBO-Dashboard') != '1':
+                    return self.send_json(403, {'error': 'dashboard_only'})
+                return self.send_json(200, supervisor.start_from_dashboard())
             if self.path == '/dashboard/dock-rest':
                 # 看板本机按钮，不要令牌；要求自定义请求头：别的网页跨站发不出这个头（浏览器会先预检，这里不应答）
                 if self.headers.get('X-EBO-Dashboard') != '1':

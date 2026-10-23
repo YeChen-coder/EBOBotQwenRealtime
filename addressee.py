@@ -56,12 +56,17 @@ QUIET_PROMPT = """你在给家里的陪伴机器人做判断。机器人叫“{n
 只回答 yes 或 no。"""
 
 
+FAMILY_TITLES = {'妈妈', '爸爸', '姐姐'}
+
+
 class AddresseeClassifier:
     def __init__(self, api_key: str, region: str, model: str, names: tuple[str, ...], timeout: float = 5):
         self.api_key = api_key
         self.url = ENDPOINTS.get(region, ENDPOINTS['cn'])
         self.model = model
         self.timeout = timeout
+        # “妈妈”也是唤醒词（妈妈常用“妈妈”自称跟它说话），但不是机器人的名字，不能写进“机器人叫……”
+        names = tuple(n for n in names if n not in FAMILY_TITLES)
         self.system = PROMPT.format(names='”或“'.join(names) if names else '猫猫')
         self.quiet_system = QUIET_PROMPT.format(names='”或“'.join(names) if names else '猫猫',
                                                 name=names[-1] if names else '猫猫')

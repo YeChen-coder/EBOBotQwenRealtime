@@ -458,7 +458,7 @@ class MemoryManager:
             lines.append(f'{self.store.now(at):%H:%M:%S} {who}：{text}')
         faces = sorted({name for name, _at in record.faces})
         user = [f'家里时间：{started:%Y-%m-%d} 周{WEEKDAYS[started.weekday()]} {started:%H:%M}',
-                f'这场对话怎么开始的：{ {"voice": "有人叫了它", "greeting": "认出家人回家，猫猫主动打招呼"}.get(record.trigger, record.trigger) }',
+                f'这场对话怎么开始的：{ {"voice": "有人叫了它", "greeting": "认出家人回家，猫猫主动打招呼", "dashboard": "有人在看板上点了唤醒"}.get(record.trigger, record.trigger) }',
                 f'对话前后摄像头认出的人：{"、".join(faces) if faces else "没有认出（不代表没人）"}']
         if tracked:
             user.append('正在关心的事：\n' + '\n'.join(
