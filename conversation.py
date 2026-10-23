@@ -34,6 +34,9 @@ ASSISTANT_NOT_GOING = re.compile(r'(不|别|没)[^，,]{0,2}(回去|去充电|�
 def says_going_to_dock(reply: str) -> bool:
     return any(ASSISTANT_GOING_TO_DOCK.search(sentence) and not ASSISTANT_NOT_GOING.search(sentence)
                for sentence in re.split(r'(?<=[。！？!?.])', reply))  # 服务端转录超过这个时间就改用本地 Whisper
+# 家人的话是以文字发给模型的（见 _settle_turn），来自语音识别
+ASR_TEXT_INSTRUCTION = ('\n家人说的话会以文字形式给你，是语音识别出来的，常有同音错别字（比如“小人儿”写成“小人”），'
+                        '请按读音和上下文理解，不要指出错字。')
 DOCK_INSTRUCTION = ('\n你有自己的充电座。如果有人让你回去充电、回充电座或回去休息，你会自动回去，'
                     '只要简短答应一句（比如“好的，我去充电啦”），不要说自己做不到。')
 
@@ -93,6 +96,8 @@ class Conversation:
         self.wake_words: tuple[str, ...] = ()
         self.skip_addressee_once = False
         self.last_assistant_text = ''
+        self.turn_ended_at = time.monotonic()
+        self.first_audio_logged = True      # 只记“这一轮之后的第一段回复声音”
         # 由 Supervisor 注入：用户让它回去充电时调用（发回充命令、暂停视觉跟随）
         self.on_dock_request = None
         self.on_quiet_request = None   # 由 Supervisor 注入：用户让它闭嘴时调用
@@ -189,7 +194,7 @@ class Conversation:
             # response.create 里的 instructions 只管第一句；后面怎么接着聊要放进整场对话的指令里
             text += f'\n这场对话是你主动开始的：{self.opening_prompt}'
         # 回充由程序在听到请求时自动执行，模型只需要答应，不能说自己做不到
-        return text + DOCK_INSTRUCTION
+        return text + ASR_TEXT_INSTRUCTION + DOCK_INSTRUCTION
 
     async def _opening(self):
         """先送唤醒句音频，再由主循环送 startup_audio 与实时音频，最后统一 commit。"""
@@ -295,6 +300,7 @@ class Conversation:
             return
         LOG.info('User turn ended; transcribing before deciding whether to commit')
         self.uncommitted_audio = False
+        self.turn_ended_at = time.monotonic()
         self.turn_detector.reset()
         turn_pcm = bytes(self.turn_audio)
         self.turn_audio.clear()
@@ -319,14 +325,22 @@ class Conversation:
         LOG.info('ASR transcript late or unavailable; local Whisper heard: %r', text)
         return text
 
-    async def _settle_turn(self, turn_pcm: bytes, respond: bool):
-        """判断完：要回复才把这一轮音频送进对话并 commit；否则对话模型根本听不到（电视声、噪声不进上下文）。
-        不能边说边送、不回复时再 clear：实测音频结尾带静音时服务端已经切好段，clear 清不掉，
-        commit 进去的反而是被丢弃的那句。一次性送比边说边送晚 0.2~0.9 秒出声，识别连接快回来了。"""
+    async def _settle_turn(self, turn_pcm: bytes, respond: bool, text: str = ''):
+        """判断完：要回复才把这一轮送进对话；否则对话模型根本听不到（电视声、噪声不进上下文）。
+
+        送识别出的文字，不送音频。实测（10-23）：判断完一次性送音频，服务端要按音频时长“听”一遍才开始回答，
+        2 秒的话要 2.5~5 秒才出声，夹着电视声的长句等 20 秒；送文字约 1 秒。
+        也不能边说边送、不回复时再清掉：实测 input_audio_buffer.clear 和 conversation.item.delete
+        都回“成功”，模型却照样回答被丢掉的那句。"""
         try:
             if respond and self.qwen and not self.stop.is_set():
-                await self.qwen.send_audio(resample_24k_to_16k(turn_pcm))
-                await self.qwen.commit_audio_buffer()
+                if text.strip():
+                    await self.qwen.create_conversation_item(text.strip(), f'item_{uuid.uuid4().hex[:20]}')
+                else:
+                    await self.qwen.send_audio(resample_24k_to_16k(turn_pcm))
+                    await self.qwen.commit_audio_buffer()
+                LOG.info('Reply requested %.1fs after the turn ended', time.monotonic() - self.turn_ended_at)
+                self.first_audio_logged = False
                 self.last_activity = time.monotonic()
                 self.response_active = True
                 self.state.increment('manual_responses_requested')
@@ -337,6 +351,7 @@ class Conversation:
     async def _respond_if_speech(self, turn_pcm: bytes, transcript: asyncio.Future | None):
         """只有这一轮真的有人说话才回复：噪声/电视声被切成一轮时转录为空，回复会变成反复道歉。"""
         respond = False
+        text = ''
         try:
             text = await self._turn_transcript(turn_pcm, transcript)
             if not valid_wake_text(text):
@@ -370,7 +385,7 @@ class Conversation:
                     await asyncio.to_thread(self.on_dock_request)
             respond = not (self.stop.is_set() or self.response_active or not self.qwen)
         finally:
-            await self._settle_turn(turn_pcm, respond)
+            await self._settle_turn(turn_pcm, respond, text)
 
     def offer_audio(self, pcm: bytes):
         """接收来自 EBO 的 24 kHz 音频（可在会话连上之前调用）"""
@@ -394,6 +409,9 @@ class Conversation:
     def _handle_audio_delta(self, pcm: bytes):
         """处理通义千问返回的音频片段"""
         try:
+            if not self.first_audio_logged:
+                self.first_audio_logged = True
+                LOG.info('First reply audio %.1fs after the turn ended', time.monotonic() - self.turn_ended_at)
             self.current_audio_buffer.extend(pcm)
             self.speaker.stream_delta(pcm, self.current_response_id)
         except Exception as exc:
