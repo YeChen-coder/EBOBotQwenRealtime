@@ -24,6 +24,7 @@ from monitoring import (DASHBOARD_HTML, LogBuffer, add_ice_host, mjpeg_url,
 from greeter import HomecomingGreeter
 from memory import MemoryManager, SessionRecord
 from weather_brief import WeatherBrief
+from bedtime import Bedtime
 from person_tracker import PersonTracker
 from scan_detector import ScanDetector
 from standby_voice import StandbyVoice, VoiceTurn
@@ -53,6 +54,7 @@ class Supervisor:
         self.wake = StandbyVoice(config, state, self.voice_eligible, self.accept_voice)
         self.tracker = None  # main() 在启用视觉跟随时设置
         self.weather = None  # main() 在启用早上天气播报时设置
+        self.bedtime: Bedtime | None = None   # main() 在启用睡前陪聊时设置
         self.memory: MemoryManager | None = None   # main() 设置；全家一份的记忆
         self.greeter: HomecomingGreeter | None = None
         self.wake.on_quiet_request = self.handle_quiet_request
@@ -176,6 +178,20 @@ class Supervisor:
                 LOG.info('Played the %s announcement without a conversation: %s', label, exc)
             return True
 
+    def offer_bedtime(self, prompt: str, night_context: str) -> bool:
+        """晚上主动轻轻问一句要不要听八卦（bedtime.py）。正在聊天、暂停、安静模式时不打扰。"""
+        if self.wake.quiet_active():
+            return False
+        user_id = next((p.id for p in self.config.profiles if p.display_name == self.config.bedtime_name), 'guest')
+        with self.lock:
+            if not self.voice_eligible():
+                return False
+            try:
+                return self.start(user_id, 'bedtime', opening_prompt=prompt, night_context=night_context)
+            except ValueError as exc:
+                LOG.info('Skipped the bedtime offer: %s', exc)
+                return False
+
     def start_from_dashboard(self) -> dict:
         """看板“唤醒对话”：不用说唤醒词，直接开一场对话；它先打个招呼，让人知道它醒了。"""
         prompt = ('有人刚在看板上把你叫醒了，想跟你说话。先简短地打个招呼，一句话就好'
@@ -214,7 +230,7 @@ class Supervisor:
 
     def start(self, user_id: str = 'mother', trigger: str = 'manual',
               initial_turn: VoiceTurn | None = None, opening_prompt: str = '', spoken_first: str = '',
-              spoken_first_note: str = '') -> bool:
+              spoken_first_note: str = '', night_context: str | None = None) -> bool:
         """启动新会话"""
         profile = GUEST_PROFILE if user_id == 'guest' else self.config.profile(user_id)
 
@@ -239,6 +255,10 @@ class Supervisor:
             conversation.opening_prompt = opening_prompt
             conversation.spoken_first = spoken_first
             conversation.spoken_first_note = spoken_first_note
+            # 陪聊时段（默认 21:30~0:30）开始的对话（包括她自己叫醒它的）都带夜聊口吻和今晚谈资
+            if night_context is None and self.bedtime is not None and self.bedtime.in_hours():
+                night_context = self.bedtime.night_context()
+            conversation.night_context = night_context or ''
             conversation.addressee = self.wake.addressee
             conversation.wake_words = self.wake.wake_words
             conversation.on_dock_request = self.handle_dock_request
@@ -611,6 +631,16 @@ def make_http_handler(store: AudioStore, state: RuntimeState,
                 except Exception as exc:
                     LOG.warning('Weather test failed: %s', exc)
                     return self.send_json(200, {'accepted': False, 'error': str(exc)[:200]})
+            if self.path == '/dashboard/bedtime-test':
+                if self.headers.get('X-EBO-Dashboard') != '1':
+                    return self.send_json(403, {'error': 'dashboard_only'})
+                if supervisor.bedtime is None:
+                    return self.send_json(200, {'accepted': False, 'error': 'bedtime_disabled'})
+                try:
+                    return self.send_json(200, {'accepted': True, **supervisor.bedtime.try_now()})
+                except Exception as exc:
+                    LOG.warning('Bedtime test failed: %s', exc)
+                    return self.send_json(200, {'accepted': False, 'error': str(exc)[:200]})
             if self.path == '/dashboard/end-rest':
                 if self.headers.get('X-EBO-Dashboard') != '1':
                     return self.send_json(403, {'error': 'dashboard_only'})
@@ -778,6 +808,11 @@ def main():
             tracker.hold_on_dock = supervisor.weather.pending
         supervisor.weather.start()
 
+    if config.bedtime_enabled:
+        supervisor.bedtime = Bedtime(config, supervisor.offer_bedtime,
+                                     someone_here=tracker.person_seen_within if tracker is not None else None)
+        supervisor.bedtime.start()
+
     if config.memory_enabled:
         supervisor.memory = MemoryManager(config, state, is_idle=lambda: supervisor.active is None)
         supervisor.memory.start()
@@ -816,6 +851,8 @@ def main():
         greeter.stop()
     if supervisor.weather is not None:
         supervisor.weather.stop()
+    if supervisor.bedtime is not None:
+        supervisor.bedtime.stop()
     if supervisor.memory is not None:
         supervisor.memory.stop()
     capture.stop()

@@ -207,6 +207,8 @@ select{background:var(--card);border:1px solid var(--line);border-radius:6px;pad
       data-en-title="Same as telling it to shut up: stops the current conversation; for 18 minutes it stays silent and only wakes when clearly called">进入安静</button>
     <button id="endquiet" type="button" data-en="End quiet"
       title="马上结束安静模式，恢复正常接话" data-en-title="End quiet mode now and respond normally again">结束安静</button>
+    <button id="bedtimetest" type="button" data-en="Try bedtime chat"
+      title="马上准备今晚谈资（要联网搜，约半分钟），然后像深夜那样主动问一句要不要听八卦" data-en-title="Prepare tonight's topics (web search, about 30 s), then offer a bedtime chat like it does at night">试试睡前聊天</button>
     <button id="weathertest" type="button" data-en="Test weather"
       title="马上取今天的天气、录音并播一次，播完接着听回话（每天早上那次照常）" data-en-title="Fetch today's weather, record it, play it once now and listen for a reply (the daily morning brief still runs)">试播天气</button>
     <a class="meta" href="http://127.0.0.1:8101/" target="_blank" rel="noopener" data-en="Robot control panel ↗">机器人控制面板 ↗</a>
@@ -465,6 +467,19 @@ $('endquiet').onclick = async () => {
     if (lastHealth) { lastHealth.quiet_until = 0; render(lastHealth); }
   } catch (e) { note(() => T('失败：','Failed: ') + e.message); }
   setTimeout(() => { btn.disabled = false; }, 2000);
+};
+$('bedtimetest').onclick = async () => {
+  const btn = $('bedtimetest');
+  btn.disabled = true; note(() => T('正在准备今晚谈资…（约半分钟）','Preparing topics for tonight… (about 30 s)'));
+  try {
+    const r = await fetch('/dashboard/bedtime-test', {method: 'POST', headers: {'X-EBO-Dashboard': '1'}});
+    const j = await r.json();
+    note(() => j.accepted ? T('已开口，今晚谈资：','Offered; topics for tonight: ') + j.topics.join('；')
+      : j.error === 'bedtime_disabled' ? T('睡前陪聊没开（EBO_BEDTIME_ENABLED）','Bedtime chat is off (EBO_BEDTIME_ENABLED)')
+      : j.error === 'busy' ? T('正在聊天或安静模式，没开口','Busy or in quiet mode: not offered')
+      : T('失败：','Failed: ') + j.error);
+  } catch (e) { note(() => T('失败：','Failed: ') + e.message); }
+  btn.disabled = false;
 };
 $('weathertest').onclick = async () => {
   const btn = $('weathertest');

@@ -85,6 +85,13 @@ class Config:
     weather_dance: bool = True   # 播的时候开出充电座跳一段（要开视觉跟随；跳完照常跟人、没人就回充）
     weather_wait_minutes: float = 90  # 到点后等“客厅里有人起来了”再播，最多等这么久（5:30 + 90 = 7:00）
     weather_dir: str = '/data/weather'
+    # 睡前陪聊（bedtime.py），时间按 home_timezone 算
+    bedtime_enabled: bool = False
+    bedtime_name: str = '妈妈'
+    bedtime_hours: str = '21:30-0:30'    # 陪聊时段：看到她在就主动问一次；这段时间开始的对话都带夜聊口吻和今晚谈资
+    bedtime_prepare_time: str = '20:30'  # 联网准备今晚谈资
+    bedtime_model: str = 'qwen-plus'     # 准备谈资用的模型（要能联网搜索），按顺序试
+    bedtime_dir: str = '/data/bedtime'
     greet_context: str = ''  # 家人的背景（工作等），写进迎接提示词；隐私，只放 .env
     voice_wake_enabled: bool = True
 
@@ -229,6 +236,11 @@ class Config:
             'weather_name': 'EBO_WEATHER_NAME',
             'weather_dance': 'EBO_WEATHER_DANCE',
             'weather_wait_minutes': 'EBO_WEATHER_WAIT_MINUTES',
+            'bedtime_enabled': 'EBO_BEDTIME_ENABLED',
+            'bedtime_name': 'EBO_BEDTIME_NAME',
+            'bedtime_hours': 'EBO_BEDTIME_HOURS',
+            'bedtime_prepare_time': 'EBO_BEDTIME_PREPARE_TIME',
+            'bedtime_model': 'EBO_BEDTIME_MODEL',
             'greet_context': 'EBO_GREET_CONTEXT',
             'voice_wake_enabled': 'EBO_VOICE_WAKE_ENABLED',
             'whisper_model': 'EBO_WHISPER_MODEL',

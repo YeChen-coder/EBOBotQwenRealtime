@@ -74,6 +74,7 @@ class Conversation:
         # 开场前已经播出去的一段话（早上的天气录音）：放进上下文，对方接话或问“你刚才说啥”能接上
         self.spoken_first = ''
         self.spoken_first_note = ''   # 说那段话时还做了什么（如“开心地转了个圈”）
+        self.night_context = ''       # 深夜的对话：夜聊口吻和今晚谈资（bedtime.py）
         self.startup_audio: deque[bytes] = deque(maxlen=600)  # 100 ms 块 -> 最多 60 s
         self.startup_lock = threading.Lock()
 
@@ -198,6 +199,8 @@ class Conversation:
         text = f'{self.config.instructions}\n当前和你说话的是：{name}。' if name else self.config.instructions
         if self.memory_context:
             text += f'\n\n{self.memory_context}\n'
+        if self.night_context:
+            text += self.night_context
         if self.opening_prompt:
             # response.create 里的 instructions 只管第一句；后面怎么接着聊要放进整场对话的指令里
             text += f'\n这场对话是你主动开始的：{self.opening_prompt}'

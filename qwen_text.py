@@ -21,7 +21,7 @@ class QwenText:
         self.timeout = timeout
 
     def chat_json(self, model: str, system: str, user: str, max_tokens: int = 2000,
-                  temperature: float = 0) -> dict:
+                  temperature: float = 0, search: bool = False) -> dict:
         body = {
             'model': model,
             'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}],
@@ -30,6 +30,10 @@ class QwenText:
             'max_tokens': max_tokens,
             'enable_thinking': False,
         }
+        if search:
+            # 联网搜索（睡前谈资要当天的新鲜事）。实测 qwen-plus 搜索和 JSON 输出能一起用
+            body['enable_search'] = True
+            body['search_options'] = {'forced_search': True}
         req = request.Request(self.url, data=json.dumps(body, ensure_ascii=False).encode('utf-8'), headers={
             'Authorization': f'Bearer {self.api_key}', 'Content-Type': 'application/json'})
         started = time.monotonic()
@@ -64,12 +68,12 @@ class QwenText:
                 time.sleep(3)
 
     def chat_json_first(self, models: tuple[str, ...], system: str, user: str, max_tokens: int = 2000,
-                        temperature: float = 0) -> tuple[str, dict]:
+                        temperature: float = 0, search: bool = False) -> tuple[str, dict]:
         """按顺序试候选模型，跳过账号里没有的；返回 (实际用的模型, 回答)。"""
         last: Exception | None = None
         for model in models:
             try:
-                return model, self.chat_json(model, system, user, max_tokens, temperature)
+                return model, self.chat_json(model, system, user, max_tokens, temperature, search)
             except ModelMissing as exc:
                 LOG.info('Model %s is not available; trying the next one', exc)
                 last = exc
