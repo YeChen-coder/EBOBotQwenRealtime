@@ -101,7 +101,7 @@ class Config:
     # 视觉跟随
     tracking_enabled: bool = False
     dock_rest_seconds: float = 1080  # 用户说让它回去充电后，这么久（18 分钟）不追人
-    quiet_seconds: float = 900      # 用户让它闭嘴后，这么久只认唤醒词
+    quiet_seconds: float = 1080     # 用户让它闭嘴后，这么久（18 分钟）只认唤醒词
     timers_path: str = ''  # 上面两个倒计时跨重启保存的文件；空 = 不保存（docker-compose 里设为 /data/timers.json）
     # 找人转圈时每个方向自己识别一次（同一个 YOLOv9），门槛比 Frigate 低，能认出半身/趴着的人
     tracking_scan_enabled: bool = True

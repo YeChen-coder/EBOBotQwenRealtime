@@ -60,6 +60,17 @@ class Supervisor:
 
         state.update(assistant_enabled=self.enabled)
 
+    def quiet_from_dashboard(self) -> dict:
+        """看板按钮：跟说“闭嘴”一样，结束当前对话并进入安静模式。"""
+        self.handle_quiet_request()
+        LOG.info('Dashboard: quiet mode started')
+        return {'accepted': True, 'quiet_seconds': self.config.quiet_seconds}
+
+    def end_quiet_from_dashboard(self) -> dict:
+        was_quiet = self.wake.quiet_active()
+        self.wake.end_quiet('dashboard')
+        return {'accepted': True, 'was_quiet': was_quiet}
+
     def handle_quiet_request(self):
         """用户让它闭嘴：结束当前对话；一段时间内只有唤醒词能叫醒它（仍然本地听写，但不发任何请求）。"""
         self.wake.quiet(self.config.quiet_seconds)
@@ -151,6 +162,7 @@ class Supervisor:
         """看板“唤醒对话”：不用说唤醒词，直接开一场对话；它先打个招呼，让人知道它醒了。"""
         prompt = ('有人刚在看板上把你叫醒了，想跟你说话。先简短地打个招呼，一句话就好'
                   '（比如“我在呢，想聊点什么？”），然后等对方说。')
+        self.wake.end_quiet('dashboard wake button')
         try:
             started = self.start('guest', 'dashboard', opening_prompt=prompt)
         except ValueError as exc:
@@ -584,6 +596,11 @@ def make_http_handler(store: AudioStore, state: RuntimeState,
                 if supervisor.tracker is None:
                     return self.send_json(200, {'accepted': False, 'error': 'tracking_disabled'})
                 return self.send_json(200, {'accepted': True, 'was_resting': supervisor.tracker.end_rest()})
+            if self.path in ('/dashboard/quiet-start', '/dashboard/quiet-end'):
+                if self.headers.get('X-EBO-Dashboard') != '1':
+                    return self.send_json(403, {'error': 'dashboard_only'})
+                return self.send_json(200, supervisor.quiet_from_dashboard() if self.path == '/dashboard/quiet-start'
+                                      else supervisor.end_quiet_from_dashboard())
             if self.path == '/dashboard/session-start':
                 if self.headers.get('X-EBO-Dashboard') != '1':
                     return self.send_json(403, {'error': 'dashboard_only'})
@@ -716,6 +733,7 @@ def main():
         tracker = PersonTracker(
             config, state, ebo.command,
             allowed=lambda: supervisor.enabled and not state.snapshot()['input_speech_active'],
+            in_conversation=lambda: supervisor.active is not None,
         )
         if config.tracking_scan_enabled:
             try:

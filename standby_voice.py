@@ -13,7 +13,7 @@ import webrtcvad
 
 import timers
 import wake_match
-from addressee import AddresseeClassifier, may_be_dock_request, may_be_quiet_request
+from addressee import FAMILY_TITLES, AddresseeClassifier, may_be_dock_request, may_be_quiet_request
 from audio_utils import FRAME_BYTES_24K, MotionNoiseGate, is_speech_24k, pcm16k_to_float, resample_24k_to_16k
 
 LOG = logging.getLogger('ebo-standby-voice')
@@ -62,6 +62,12 @@ def actionable_transcript(transcript: str) -> bool:
 
 def compact_text(text: str) -> str:
     return ''.join(re.findall(r'[\w一-鿿]', text or '')).lower()
+
+
+def valid_reply_text(text: str) -> bool:
+    """对话中的一句：比待机宽。实测妈妈在对话里说“喂。”“对。”被当成没说话丢掉；单字也算，只丢纯语气词。"""
+    compact = compact_text(text)
+    return bool(compact) and not is_filler(text) and actionable_transcript(text) and not REPEATED.fullmatch(compact)
 
 
 def valid_wake_text(text: str, wake_words: tuple[str, ...] = ()) -> bool:
@@ -157,7 +163,13 @@ class WhisperTranscriber:
             condition_on_previous_text=False,
             vad_filter=True,  # 先用 Silero VAD 去掉非语音，Whisper 对噪声会编出句子
         )
+        segments = list(segments)
         kept = [s.text for s in segments if s.no_speech_prob < 0.6 and s.avg_logprob > -1.0]
+        dropped = [f'{s.text.strip()}(nsp={s.no_speech_prob:.2f},lp={s.avg_logprob:.2f})'
+                   for s in segments if s.text.strip() and not (s.no_speech_prob < 0.6 and s.avg_logprob > -1.0)]
+        if dropped:
+            # 置信度低被丢掉的也记下来：以前日志里只看到 ''，不知道是没人说话还是筛得太狠
+            LOG.info('standby dropped low-confidence Whisper text: %s', self.to_simplified.convert(' | '.join(dropped))[:300])
         text = self.to_simplified.convert(''.join(kept).strip())
         if any(phrase in text for phrase in HALLUCINATIONS):
             LOG.info('standby ignored Whisper hallucination: %r', text)
@@ -268,8 +280,18 @@ class StandbyVoice:
             return False
         recent = self.recent_heard()
         self.heard.append((time.monotonic(), text))
-        if self.quiet_active() and not wake_word:
-            return False
+        if self.quiet_active():
+            if not wake_word:
+                return False
+            # 实测安静模式常被几秒后的闲聊打断：“爸爸妈妈讲的……”（妈妈）、“这个小机器人外头特别讨厌你”、
+            # “那么多猫毛呢”（读音容错成猫猫）。安静时“妈妈”不算唤醒词，其他唤醒词还要模型确认是在叫它
+            strict_words = tuple(w for w in self.wake_words if w not in FAMILY_TITLES)
+            if not (strict_words and has_wake_word(text, strict_words)):
+                LOG.info('Quiet mode: ignored %r (only a family title)', text)
+                return False
+            if self.addressee is not None and self.addressee.is_addressed(text, recent=recent) is not True:
+                LOG.info('Quiet mode: wake word heard but not talking to the robot: %r', text)
+                return False
         # 待机时直接说“闭嘴”：不唤醒，进入安静（含唤醒词的“猫猫闭嘴”同理）
         if (self.addressee is not None and self.on_quiet_request and may_be_quiet_request(text)
                 and (wake_word or self.addressee.is_addressed(text, recent=recent) is True)

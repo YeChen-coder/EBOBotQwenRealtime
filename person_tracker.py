@@ -96,11 +96,13 @@ def fetch_detect_size(frigate_url: str, camera: str) -> tuple[int, int]:
 
 class PersonTracker:
     def __init__(self, config, state, command: Callable[[str, str], None],
-                 allowed: Callable[[], bool], frame_size: Callable[[], tuple[int, int]] | None = None):
+                 allowed: Callable[[], bool], frame_size: Callable[[], tuple[int, int]] | None = None,
+                 in_conversation: Callable[[], bool] = lambda: False):
         self.config = config
         self.state = state
         self.command = command
         self.allowed = allowed
+        self.in_conversation = in_conversation
         self._frame_size = frame_size or (lambda: fetch_detect_size(config.frigate_url, config.camera_name))
         self.size: tuple[int, int] | None = None
         self._size_retry_at = 0.0
@@ -292,6 +294,10 @@ class PersonTracker:
         return self._absent_step(now)
 
     def _absent_step(self, now: float) -> dict | None:
+        if self.in_conversation():
+            # 正在聊天就说明人在旁边，只是摄像头没拍到（实测妈妈坐着聊天时它自己回充，
+            # Engine 回充时断开声音和视频，一句回答没播出来）。聊完再从头计时
+            self.last_person_at = now
         absent = now - self.last_person_at
         self.state.update(tracking_absent_seconds=round(absent))
         if not self.left_dock and not self.off_dock_reported:

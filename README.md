@@ -182,7 +182,7 @@ Okay, here it is step by step, with the model or tool used at each step.
 1. **Hear sound, decide the sentence is finished** (pause of about 0.9 s): WebRTC VAD, a local voice-detection algorithm, not an AI model.
 2. **Transcribe**: local **Whisper small** (`Systran/faster-whisper-small`, CPU). Before transcribing, **Silero VAD** (bundled with faster-whisper) filters out non-speech; afterwards **OpenCC** converts Traditional to Simplified Chinese.
 3. **Drop useless text** (empty, "嗯嗯" ("mm-hmm"), the same word repeated several times, stray English fragments): local rules.
-4. **In quiet mode?** (someone said "shut up" within the last 15 minutes): only wake words are accepted, everything else is ignored, no cloud model is called.
+4. **In quiet mode?** (someone said "shut up" within the last 18 minutes): only wake words are accepted, everything else is ignored, no cloud model is called.
 5. **Is it a "shut up" type phrase?** Check keywords locally first; if there's a hit, ask cloud **`qwen-plus`** to confirm. Confirmed → enter quiet mode.
 6. **Is it a "go charge" type phrase?** Check keywords locally by pronunciation ("空店" kōngdiàn and "通店" tōngdiàn count too); if there's a hit, ask **`qwen-plus`** to confirm. Confirmed → return to the dock, **no following for 18 minutes**.
 7. **Is there a wake word, "猫猫 / 小朋友" ("kitty / little one")?** Convert to pinyin with **pypinyin** and compare by pronunciation ("毛毛" and "小盆友" count too), all done locally. Yes → wake immediately.

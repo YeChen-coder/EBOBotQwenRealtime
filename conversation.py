@@ -19,13 +19,16 @@ from config import Config, Profile
 from qwen_realtime import QwenRealtimeClient, QwenConfig
 from ebo_transport import Speaker, TranscriptStore, AssistantOutputStore
 from addressee import may_be_dock_request, may_be_quiet_request
-from standby_voice import has_wake_word, valid_wake_text
+from standby_voice import has_wake_word, valid_reply_text
 from state import RuntimeState
 
 # 等服务端转出这一轮说了什么；超时就照常回复，不能因为转录慢把真人的话吞掉
 # 通义千问：一个连接 300 秒没产生回复就断开；我们自己的空闲超时必须更早
 QWEN_IDLE_LIMIT = 300
 TRANSCRIPT_WAIT_SECONDS = 3
+# 猫猫说完后这么久之内开口的，默认就是在回它，不再请模型判断。实测判断器对“然后。”“天气不好。”
+# “不是你刚才说我什么……”这类接话一律判“不是在跟机器人说”，妈妈接了话猫猫不理
+REPLY_WINDOW_SECONDS = 20
 # 模型自己说“我这就回去 / 我去充电啦 / 马上回充电座”：按单句判断，问句和否定不算
 ASSISTANT_GOING_TO_DOCK = re.compile(r'(我|这就|马上|立刻|立马|乖乖)[^，,]{0,4}(回去|去充电|回充电座|回窝)')
 ASSISTANT_NOT_GOING = re.compile(r'(不|别|没)[^，,]{0,2}(回去|去充电|回窝)|等会|待会|晚点|过会|一会儿再|[吗呢？?]')
@@ -98,6 +101,8 @@ class Conversation:
         self.last_assistant_text = ''
         self.turn_ended_at = time.monotonic()
         self.first_audio_logged = True      # 只记“这一轮之后的第一段回复声音”
+        self.last_robot_audio_at = -1e9   # 机器人最后一次在说话（含播放尾音）的时刻
+        self.turn_started_at = 0.0
         # 由 Supervisor 注入：用户让它回去充电时调用（发回充命令、暂停视觉跟随）
         self.on_dock_request = None
         self.on_quiet_request = None   # 由 Supervisor 注入：用户让它闭嘴时调用
@@ -265,6 +270,7 @@ class Conversation:
 
             # 半双工：机器人说话（含播放尾音）时丢弃麦克风输入，防止听到自己
             if self.response_active or self.speaker.input_muted():
+                self.last_robot_audio_at = time.monotonic()
                 self.turn_detector.reset()
                 self.preroll.clear()
                 continue
@@ -290,6 +296,8 @@ class Conversation:
 
     async def _send_turn_audio(self, pcm: bytes):
         """这一轮的音频：只实时送给识别连接；对话模型等判断完、要回复时才一次性送（见 _settle_turn）。"""
+        if not self.turn_audio:
+            self.turn_started_at = time.monotonic()
         self.turn_audio.extend(pcm)
         if self.asr:
             self.asr.send_audio(resample_24k_to_16k(pcm))
@@ -306,7 +314,8 @@ class Conversation:
         self.turn_audio.clear()
         self.awaiting_transcript = True
         transcript = self.asr.commit() if self.asr else None
-        asyncio.create_task(self._respond_if_speech(turn_pcm, transcript))
+        is_reply = self.turn_started_at - self.last_robot_audio_at < REPLY_WINDOW_SECONDS
+        asyncio.create_task(self._respond_if_speech(turn_pcm, transcript, is_reply))
 
     async def _turn_transcript(self, turn_pcm: bytes, transcript: asyncio.Future | None) -> str:
         """这一轮说了什么。识别连接超时或断开时用本地 Whisper：实测电视噪声的转录常常 6 秒以上才回来
@@ -348,19 +357,22 @@ class Conversation:
         finally:
             self.awaiting_transcript = False
 
-    async def _respond_if_speech(self, turn_pcm: bytes, transcript: asyncio.Future | None):
+    async def _respond_if_speech(self, turn_pcm: bytes, transcript: asyncio.Future | None, is_reply: bool = False):
         """只有这一轮真的有人说话才回复：噪声/电视声被切成一轮时转录为空，回复会变成反复道歉。"""
         respond = False
         text = ''
         try:
             text = await self._turn_transcript(turn_pcm, transcript)
-            if not valid_wake_text(text):
+            if not valid_reply_text(text):
                 # 不记进对话记录和上下文：多半是履带声等噪音被识别成的“嗯。”
                 LOG.info('Ignored turn without real speech: %r', text)
                 self.state.increment('input_turns_ignored')
                 return
             self._record_user_text(text)
             skip_check, self.skip_addressee_once = self.skip_addressee_once, False
+            if is_reply and not skip_check:
+                LOG.info('Turn started within %ds of the robot speaking; treating it as a reply', REPLY_WINDOW_SECONDS)
+                skip_check = True
             if (text and self.addressee is not None and not skip_check
                     and not has_wake_word(text, self.wake_words)):
                 # heard 的最后一条就是当前这句

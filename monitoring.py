@@ -202,6 +202,11 @@ select{background:var(--card);border:1px solid var(--line);border-radius:6px;pad
       data-en-title="Returns to the dock if it isn't charging; if it already is, just starts the cooldown. It won't follow people during the cooldown, and a restart keeps it.">回充电座并冷却</button>
     <button id="endrest" type="button" data-en="End cooldown"
       title="马上结束冷却，恢复正常跟随" data-en-title="End the cooldown now and resume normal following">结束冷却</button>
+    <button id="quietbtn" type="button" data-en="Quiet mode"
+      title="跟对它说“闭嘴”一样：马上停下当前对话，18 分钟内不主动说话，只有明确叫它才会醒"
+      data-en-title="Same as telling it to shut up: stops the current conversation; for 18 minutes it stays silent and only wakes when clearly called">进入安静</button>
+    <button id="endquiet" type="button" data-en="End quiet"
+      title="马上结束安静模式，恢复正常接话" data-en-title="End quiet mode now and respond normally again">结束安静</button>
     <button id="weathertest" type="button" data-en="Test weather"
       title="马上取今天的天气、录音并播一次（每天早上那次照常）" data-en-title="Fetch today's weather, record it and play it once now (the daily morning brief still runs)">试播天气</button>
     <a class="meta" href="http://127.0.0.1:8101/" target="_blank" rel="noopener" data-en="Robot control panel ↗">机器人控制面板 ↗</a>
@@ -296,7 +301,7 @@ function render(h) {
   const wakeState = !h.voice_wake_enabled ? tag(T('关闭','Off'),'idle') : h.voice_wake_transcribing ? tag(T('识别中','Transcribing'),'info')
                     : h.voice_wake_listening ? tag(T('监听中','Listening'),'ok') : tag(T('未监听','Not listening'),'idle');
   const quietLeft = h.quiet_until ? Math.ceil((h.quiet_until - Date.now() / 1000) / 60) : 0;
-  const quietTag = quietLeft > 0 ? tag(T(`安静中，还剩 ${quietLeft} 分钟（只认唤醒词）`, `Quiet, ${quietLeft} min left (wake words only)`), 'warn') : null;
+  const quietTag = quietLeft > 0 ? tag(T(`安静中，还剩 ${quietLeft} 分钟（只有明确叫它才醒）`, `Quiet, ${quietLeft} min left (wakes only when clearly called)`), 'warn') : null;
   const tracking = h.tracking_enabled
       ? ({following:tag(T('跟随中','Following'),'info'), centered:tag(T('已对准','Centered'),'ok'), too_close:tag(T('太近，停住','Too close, holding'),'warn'),
           paused:tag(T('暂停','Paused'),'idle'), waiting:tag(T('没看到人，原地等','No one seen, waiting'),'idle'), searching:tag(T('转圈找人','Turning to search'),'warn'),
@@ -434,6 +439,30 @@ $('endrest').onclick = async () => {
       : j.was_resting ? T('冷却已结束，恢复正常跟随','Cooldown ended; normal following resumes') : T('本来就不在冷却中，正常工作','Not cooling down; working normally'));
     wasResting = false;
     if (lastHealth) { lastHealth.tracking_status = 'idle'; lastHealth.tracking_rest_seconds = 0; render(lastHealth); }
+  } catch (e) { note(() => T('失败：','Failed: ') + e.message); }
+  setTimeout(() => { btn.disabled = false; }, 2000);
+};
+$('quietbtn').onclick = async () => {
+  const btn = $('quietbtn');
+  btn.disabled = true; note(() => T('发送中…','Sending…'));
+  try {
+    const r = await fetch('/dashboard/quiet-start', {method: 'POST', headers: {'X-EBO-Dashboard': '1'}});
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.status);
+    const mins = Math.round(j.quiet_seconds / 60);
+    note(() => T(`已进入安静模式 ${mins} 分钟`, `Quiet mode for ${mins} min`));
+  } catch (e) { note(() => T('失败：','Failed: ') + e.message); }
+  setTimeout(() => { btn.disabled = false; }, 2000);
+};
+$('endquiet').onclick = async () => {
+  const btn = $('endquiet');
+  btn.disabled = true; note(() => T('发送中…','Sending…'));
+  try {
+    const r = await fetch('/dashboard/quiet-end', {method: 'POST', headers: {'X-EBO-Dashboard': '1'}});
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.status);
+    note(() => j.was_quiet ? T('安静模式已结束','Quiet mode ended') : T('本来就不在安静模式','Was not in quiet mode'));
+    if (lastHealth) { lastHealth.quiet_until = 0; render(lastHealth); }
   } catch (e) { note(() => T('失败：','Failed: ') + e.message); }
   setTimeout(() => { btn.disabled = false; }, 2000);
 };
