@@ -150,12 +150,30 @@ class Supervisor:
                 LOG.info('Skipped homecoming greeting for %s: %s', name, exc)
                 return False
 
-    def play_prepared(self, pcm: bytes, label: str) -> bool:
-        """播一段准备好的音频（早上的天气）。正在聊天、暂停、安静模式时不播，返回 False 稍后再试。"""
+    def play_prepared(self, pcm: bytes, script: str, label: str, name: str = '') -> bool:
+        """播一段准备好的音频（早上的天气），同时开一场对话，把稿子放进上下文：
+        对方接话、问“你刚才说啥”都能接上（以前播完就结束，问了它也不知道刚才说过什么）。
+        正在聊天、暂停、安静模式时不播，返回 False 稍后再试。"""
         with self.lock:
             if not self.voice_eligible() or self.wake.quiet_active():
                 return False
-            self.speaker.finish_stream(pcm, f'{label}_{int(time.time())}')
+            output_id = f'{label}_{int(time.time())}'
+            # 先播，不等连接（约 1 秒）；连不上也照样播完
+            self.speaker.finish_stream(pcm, output_id)
+            # 边播边跳：开出充电座、扭一扭、蹦两下、转一圈（播放时麦克风本来就静音，履带声不进对话）
+            danced = (label == 'weather' and self.config.weather_dance and self.tracker is not None
+                      and self.tracker.dance())
+            self.outputs.append(output_id=output_id, response_id=output_id, item_id=output_id,
+                                transcript=script, metadata=self.speaker.output_metrics(output_id))
+            if not script:
+                return True
+            user_id = next((p.id for p in self.config.profiles if p.display_name == name), 'guest')
+            try:
+                note = '一边说一边开心地从充电座上冲出来，扭来扭去、蹦了两下、转了个圈' if danced else ''
+                if self.start(user_id, label, spoken_first=script, spoken_first_note=note):
+                    LOG.info('Opened a conversation after the %s announcement', label)
+            except ValueError as exc:
+                LOG.info('Played the %s announcement without a conversation: %s', label, exc)
             return True
 
     def start_from_dashboard(self) -> dict:
@@ -195,7 +213,8 @@ class Supervisor:
             return self.start('guest', 'voice', turn)
 
     def start(self, user_id: str = 'mother', trigger: str = 'manual',
-              initial_turn: VoiceTurn | None = None, opening_prompt: str = '') -> bool:
+              initial_turn: VoiceTurn | None = None, opening_prompt: str = '', spoken_first: str = '',
+              spoken_first_note: str = '') -> bool:
         """启动新会话"""
         profile = GUEST_PROFILE if user_id == 'guest' else self.config.profile(user_id)
 
@@ -218,6 +237,8 @@ class Supervisor:
             )
             conversation.initial_turn = initial_turn
             conversation.opening_prompt = opening_prompt
+            conversation.spoken_first = spoken_first
+            conversation.spoken_first_note = spoken_first_note
             conversation.addressee = self.wake.addressee
             conversation.wake_words = self.wake.wake_words
             conversation.on_dock_request = self.handle_dock_request
@@ -750,7 +771,8 @@ def main():
         LOG.info('Visual person following enabled')
 
     if config.weather_enabled:
-        supervisor.weather = WeatherBrief(config, lambda pcm: supervisor.play_prepared(pcm, 'weather'))
+        supervisor.weather = WeatherBrief(config, lambda pcm, script: supervisor.play_prepared(
+            pcm, script, 'weather', config.weather_name))
         supervisor.weather.start()
 
     if config.memory_enabled:

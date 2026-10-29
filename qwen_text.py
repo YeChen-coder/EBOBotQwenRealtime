@@ -20,12 +20,13 @@ class QwenText:
         self.url = ENDPOINTS.get(region, ENDPOINTS['cn'])
         self.timeout = timeout
 
-    def chat_json(self, model: str, system: str, user: str, max_tokens: int = 2000) -> dict:
+    def chat_json(self, model: str, system: str, user: str, max_tokens: int = 2000,
+                  temperature: float = 0) -> dict:
         body = {
             'model': model,
             'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}],
             'response_format': {'type': 'json_object'},
-            'temperature': 0,
+            'temperature': temperature,
             'max_tokens': max_tokens,
             'enable_thinking': False,
         }
@@ -62,12 +63,13 @@ class QwenText:
                 LOG.info('Qwen text request failed (%s); retrying once', exc)
                 time.sleep(3)
 
-    def chat_json_first(self, models: tuple[str, ...], system: str, user: str, max_tokens: int = 2000) -> tuple[str, dict]:
+    def chat_json_first(self, models: tuple[str, ...], system: str, user: str, max_tokens: int = 2000,
+                        temperature: float = 0) -> tuple[str, dict]:
         """按顺序试候选模型，跳过账号里没有的；返回 (实际用的模型, 回答)。"""
         last: Exception | None = None
         for model in models:
             try:
-                return model, self.chat_json(model, system, user, max_tokens)
+                return model, self.chat_json(model, system, user, max_tokens, temperature)
             except ModelMissing as exc:
                 LOG.info('Model %s is not available; trying the next one', exc)
                 last = exc

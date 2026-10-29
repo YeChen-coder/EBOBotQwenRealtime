@@ -71,6 +71,9 @@ class Conversation:
         # 两者都必须在实时麦克风音频之前送达模型，保证用户输入不丢。
         self.initial_turn = None
         self.opening_prompt = ''  # 非空时一连上就主动开口（家人回家打招呼）
+        # 开场前已经播出去的一段话（早上的天气录音）：放进上下文，对方接话或问“你刚才说啥”能接上
+        self.spoken_first = ''
+        self.spoken_first_note = ''   # 说那段话时还做了什么（如“开心地转了个圈”）
         self.startup_audio: deque[bytes] = deque(maxlen=600)  # 100 ms 块 -> 最多 60 s
         self.startup_lock = threading.Lock()
 
@@ -198,12 +201,26 @@ class Conversation:
         if self.opening_prompt:
             # response.create 里的 instructions 只管第一句；后面怎么接着聊要放进整场对话的指令里
             text += f'\n这场对话是你主动开始的：{self.opening_prompt}'
+        if self.spoken_first:
+            text += (f'\n这场对话是你主动开始的：你刚刚已经对{name or "家人"}说了下面这段话（已经播完了）：'
+                     f'「{self.spoken_first}」'
+                     + (f'说的时候你还{self.spoken_first_note}（是你自己高兴才这么做的）。'
+                        if self.spoken_first_note else '')
+                     + f'\n对方接下来说的话多半是在回应它，或者问你刚才说了什么、'
+                     f'哪句没听清。顺着接话，活泼、简短；没让你重说就别从头再念一遍，'
+                     f'问到哪句就只说那句，数字照上面那段说，不要改。')
         # 回充由程序在听到请求时自动执行，模型只需要答应，不能说自己做不到
         return text + ASR_TEXT_INSTRUCTION + DOCK_INSTRUCTION
 
     async def _opening(self):
         """先送唤醒句音频，再由主循环送 startup_audio 与实时音频，最后统一 commit。"""
         turn, self.initial_turn = self.initial_turn, None
+        if self.spoken_first:
+            # 录音由 Supervisor 在连上之前就开始播了；这里只记成机器人说过的话，然后等对方开口
+            LOG.info('Opening after a prepared announcement: %s', self.trigger)
+            self.last_assistant_text = self.spoken_first[-200:]
+            self.memory_lines.append(('assistant', self.spoken_first, time.time()))
+            return
         if self.opening_prompt:
             LOG.info('Opening by speaking first: %s', self.trigger)
             # 我们先开口，对方接下来的第一句话一定是在回我们，不用再判断是不是在跟机器人说

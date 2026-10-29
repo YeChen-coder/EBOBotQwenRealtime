@@ -77,11 +77,12 @@ class Config:
     home_timezone: str = ''
     # 每天早上定时播天气（weather_brief.py），时间按 home_timezone 算
     weather_enabled: bool = False
-    weather_time: str = '06:00'
+    weather_time: str = '05:30'  # 妈妈一般 5 点半起床
     weather_city: str = '天津'
     weather_lat: float = 39.1422
     weather_lon: float = 117.1767
     weather_name: str = '妈妈'   # 播报开头称呼谁
+    weather_dance: bool = True   # 播的时候开出充电座跳一段（要开视觉跟随；跳完照常跟人、没人就回充）
     weather_dir: str = '/data/weather'
     greet_context: str = ''  # 家人的背景（工作等），写进迎接提示词；隐私，只放 .env
     voice_wake_enabled: bool = True
@@ -225,6 +226,7 @@ class Config:
             'weather_lat': 'EBO_WEATHER_LAT',
             'weather_lon': 'EBO_WEATHER_LON',
             'weather_name': 'EBO_WEATHER_NAME',
+            'weather_dance': 'EBO_WEATHER_DANCE',
             'greet_context': 'EBO_GREET_CONTEXT',
             'voice_wake_enabled': 'EBO_VOICE_WAKE_ENABLED',
             'whisper_model': 'EBO_WHISPER_MODEL',

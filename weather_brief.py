@@ -1,8 +1,10 @@
-"""每天早上定时播报天气（默认 6:00，天津）。
+"""每天早上定时播报天气（默认 5:30，天津）。
 
-妈妈早上 6 点肯定已经起了。提前 15 分钟准备好：从 Open-Meteo（免费、不用 Key）取今天的天气和空气质量，
+妈妈一般 5 点半起床。提前 15 分钟准备好：从 Open-Meteo（免费、不用 Key）取今天的天气和空气质量，
 按固定模板写成播报稿（数字不经过大模型，不会编），再让对话用的同一个千问实时模型、同一个音色
 把稿子念出来，录成音频存到 /data/weather/。到点直接播，不用等模型现场生成；重启也不丢。
+为了不像念新闻：开头一句俏皮话和结尾一句打气的话，每天让千问文字模型现写（不许带数字，
+取不到就从下面的句子里按日子轮换），念的时候也要求活泼、带笑。
 正在聊天、暂停、安静模式时先等着，30 分钟内找到空当再播，过了就不播了。
 """
 from __future__ import annotations
@@ -10,6 +12,7 @@ import asyncio
 import difflib
 import json
 import logging
+import re
 import threading
 import time
 from datetime import datetime, timedelta
@@ -20,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 import timers
 from qwen_realtime import QwenConfig, QwenRealtimeClient
+from qwen_text import QwenText
 
 LOG = logging.getLogger('ebo-weather')
 
@@ -38,9 +42,39 @@ WEATHER = {
 }
 
 READER_INSTRUCTIONS = (
-    '你是播音员。用户发来的是一段写好的天气播报稿，你要用温柔、亲切、自然的语气，'
-    '把它一字不改地读出来。不要加任何开场白或结束语，不要回答、解释或改写，只读稿子。'
+    '你是家里一个活泼可爱的小机器人，每天一大早跟家人说早安。用户发来的是一段写好的早安播报稿，'
+    '你要用元气满满、带着笑意、蹦蹦跳跳的语气读出来：语调上扬、节奏轻快，像开心地跑过去跟她打招呼，'
+    '但吐字清楚，数字读得稳一点。稿子要一字不改地读，不要加任何开场白或结束语，'
+    '不要回答、解释或改写，只读稿子。'
 )
+
+# 模型写不出来时用的开头 / 结尾（按日子轮换，连续几天不重样）
+OPENERS = (
+    '新的一天开张啦！', '我早就醒啦，一直在等你呢！', '你比太阳公公起得还早，真厉害！',
+    '起床啦起床啦，今天也要元气满满哦！', '叮咚，你的小机器人准时报到！', '伸个大大的懒腰，新的一天来咯！',
+    '又见到你啦，我好开心！',
+)
+CLOSERS = (
+    '今天也要开开心心的哦！', '冲呀，今天也是顺顺利利的一天！', '记得吃早饭哦，别饿着肚子！',
+    '慢慢来不着急，我陪着你呢！', '你最棒啦，今天也加油！', '今天要是累了，就跟我说说哦！',
+    '给你一个大大的抱抱！',
+)
+WEEKDAY_HINTS = {
+    0: '今天周一，新的一周开始了', 3: '今天周四，离周末不远了', 4: '今天周五，上完今天就是周末了',
+    5: '今天周六，是周末', 6: '今天周日，是周末，明天又要上班了',
+}
+FLAVOR_SYSTEM = (
+    '你是家里一个活泼可爱、有点调皮的小机器人，每天一大早给{name}播天气。天气的数字有固定的稿子，'
+    '你只负责写两句话：opener 接在“{name}早上好！”后面，是一句俏皮、开心的早安话；'
+    'closer 放在最后，是一句给她打气或关心她的话。\n'
+    '要求：每句最多 20 个字，口语、可爱、有画面感，可以用“啦”“呀”“哦”“咯”；'
+    '可以顺着今天的天气或星期几说，但不要出现任何数字、温度、日期，也不要重复稿子里的天气信息；'
+    '穿衣、带伞、戴口罩稿子里已经说过了，这两句都别再提；'
+    '不要假设她今天发生了什么（生病、考试、开会之类）；她起得很早，可以夸她勤快；说“现在天还没亮”时不要说阳光、太阳；'
+    '不要说你做不到的事（你是地上的小机器人，只会说话、跟着走）。'
+    '每天都要不一样，不要用最普通的套话。只输出 JSON：{{"opener": "...", "closer": "..."}}'
+)
+_NO_DIGITS = re.compile(r'[0-9０-９度℃%％]')
 
 
 def _get_json(url: str) -> dict:
@@ -51,7 +85,7 @@ def _get_json(url: str) -> dict:
 def fetch_weather(lat: float, lon: float, tz: str) -> dict:
     query = parse.urlencode({
         'latitude': lat, 'longitude': lon, 'timezone': tz, 'forecast_days': 1,
-        'daily': 'weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max',
+        'daily': 'weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max,sunrise',
         'hourly': 'temperature_2m',
     })
     data = _get_json('https://api.open-meteo.com/v1/forecast?' + query)
@@ -77,10 +111,52 @@ def _wind_level(kmh: float) -> int:
     return 12
 
 
-def compose(weather: dict, city: str, name: str, day: datetime) -> str:
+def default_flavor(day: datetime) -> tuple[str, str]:
+    n = day.toordinal()
+    return OPENERS[n % len(OPENERS)], CLOSERS[(n * 3) % len(CLOSERS)]
+
+
+def _clean_line(text, name: str = '') -> str:
+    text = str(text or '').strip().strip('“”"\'')
+    # 实测模型常把“妈妈早上好！”再写一遍，接在稿子的“妈妈早上好！”后面就念两遍了
+    words = '|'.join(filter(None, (re.escape(name), '早上好', '早安')))
+    while (stripped := re.sub(rf'^(?:{words})[啦呀哦]?[，,！!~～\s]*', '', text)) != text:
+        text = stripped
+    if not text or len(text) > 30 or _NO_DIGITS.search(text):
+        return ''
+    return text if text[-1] in '！。？~～' else text + '！'
+
+
+def write_flavor(config, weather: dict, city: str, name: str, day: datetime,
+                 client: QwenText | None = None) -> tuple[str, str]:
+    """千问文字模型现写开头、结尾各一句；不合格的那句换成轮换的句子。"""
+    opener, closer = default_flavor(day)
+    sky = WEATHER.get(weather.get('weather_code'), '') or '天气一般'
+    rain = weather.get('precipitation_probability_max') or 0
+    morning = weather.get('temp_7am')
+    feel = ('很冷' if morning <= 0 else '挺凉' if morning <= 10 else '不冷不热' if morning <= 22 else '挺热'
+            ) if morning is not None else ''
+    sunrise = weather.get('sunrise') or ''  # 当地时间 '2026-10-29T06:28'
+    dark = '现在天还没亮。' if sunrise and day.strftime('%Y-%m-%dT%H:%M') < sunrise else ''
+    user = (f'今天是{day.month}月{day.day}日，星期{WEEKDAYS[day.weekday()]}。'
+            f'{WEEKDAY_HINTS.get(day.weekday(), "")}。{dark}{city}今天{sky}'
+            f'{"，早上" + feel if feel else ""}{"，可能下雨" if rain >= 30 else ""}。')
+    try:
+        client = client or QwenText(config.qwen_api_key, config.qwen_region, timeout=30)
+        _model, result = client.chat_json_first(config.memory_models, FLAVOR_SYSTEM.format(name=name), user,
+                                                200, temperature=1.0)
+        opener = _clean_line(result.get('opener'), name) or opener
+        closer = _clean_line(result.get('closer')) or closer
+    except Exception as exc:  # 写不出来就用轮换的句子，天气照播
+        LOG.warning('Morning flavor lines unavailable: %s', exc)
+    return opener, closer
+
+
+def compose(weather: dict, city: str, name: str, day: datetime,
+            opener: str = '', closer: str = '祝你今天顺顺利利！') -> str:
     hi, lo = round(weather['temperature_2m_max']), round(weather['temperature_2m_min'])
     sky = WEATHER.get(weather.get('weather_code'), '')
-    parts = [f'{name}早上好！今天是{day.month}月{day.day}日，星期{WEEKDAYS[day.weekday()]}。',
+    parts = [f'{name}早上好！{opener}今天是{day.month}月{day.day}日，星期{WEEKDAYS[day.weekday()]}。',
              f'{city}今天{sky}，气温{lo}到{hi}度。' if sky else f'{city}今天气温{lo}到{hi}度。']
     morning = weather.get('temp_7am')
     if morning is not None:
@@ -109,7 +185,7 @@ def compose(weather: dict, city: str, name: str, day: datetime) -> str:
         parts.append('空气污染比较重，出门记得戴口罩。')
     elif aqi is not None and aqi > 100:
         parts.append('空气有点污染，出门最好戴个口罩。')
-    parts.append('祝你今天顺顺利利！')
+    parts.append(closer)
     return ''.join(parts)
 
 
@@ -147,9 +223,9 @@ def render(config, script: str) -> bytes:
 
 
 class WeatherBrief:
-    def __init__(self, config, play: Callable[[bytes], bool]):
+    def __init__(self, config, play: Callable[[bytes, str], bool]):
         self.config = config
-        self.play = play  # play(pcm24k) -> 是否播出去了（忙的时候返回 False，稍后再试）
+        self.play = play  # play(pcm24k, 稿子) -> 是否播出去了（忙的时候返回 False，稍后再试）
         self.tz = ZoneInfo(config.home_timezone) if config.home_timezone else None
         hour, minute = (int(x) for x in config.weather_time.split(':'))
         self.at = (hour, minute)
@@ -171,7 +247,8 @@ class WeatherBrief:
         day = day or self._now()
         weather = fetch_weather(self.config.weather_lat, self.config.weather_lon,
                                 self.config.home_timezone or 'auto')
-        script = compose(weather, self.config.weather_city, self.config.weather_name, day)
+        opener, closer = write_flavor(self.config, weather, self.config.weather_city, self.config.weather_name, day)
+        script = compose(weather, self.config.weather_city, self.config.weather_name, day, opener, closer)
         LOG.info('Weather script for %s: %s', day.strftime('%Y-%m-%d'), script)
         audio = render(self.config, script)
         if not audio:
@@ -189,7 +266,7 @@ class WeatherBrief:
         """看板“试播天气”：马上重新准备并播一次（不影响每天定时那次）"""
         with self.lock:
             audio, script = self.prepare()
-        if not self.play(audio):
+        if not self.play(audio, script):
             raise RuntimeError('busy')
         return script
 
@@ -201,7 +278,7 @@ class WeatherBrief:
         key = 'weather_played'
         if timers.remaining(self.config.timers_path, key) > 0:
             return
-        pcm_path, _ = self._paths(now)
+        pcm_path, txt_path = self._paths(now)
         if not pcm_path.exists():
             if time.monotonic() < self.next_prepare_try:
                 return
@@ -214,7 +291,7 @@ class WeatherBrief:
                 return
         if now < start:
             return
-        if self.play(pcm_path.read_bytes()):
+        if self.play(pcm_path.read_bytes(), txt_path.read_text(encoding='utf-8') if txt_path.exists() else ''):
             LOG.info('Played the morning weather brief')
             tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
             timers.save(self.config.timers_path, key, tomorrow.timestamp())

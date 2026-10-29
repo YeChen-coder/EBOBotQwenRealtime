@@ -48,6 +48,23 @@ DOCK_RETRY_SECONDS = 300
 # 640x360 画面里小于这个面积的“人”不理（走廊远处真人约 4400 像素，窗外剪影约 1200）
 MIN_PERSON_PIXELS = 2500
 SCAN_CONFIRM_DELAY = 1.0  # 自识别看到人后隔这么久同一方向再看一次，两次都在才算 # 发了回充但还没充上电，这么久之后再试一次
+# 早上播天气时跳的一段舞（约 16 秒，命令还有 1~2 秒延迟；天气录音约 20 秒，跳完她回话时履带已经停了）。
+# ('drive', 速度, 秒) 往前冲；('turn', 角度) 按角度转（103001，正 = 右）。
+# 实测（10-28 真机）：转圈、扭动都用按角度转——转得准、快（360° 实际转约 1 秒），贴着家具也转得开；
+# 双摇杆连续转（move/vector 的 rx）buttons=1 时 0.3 秒只转约 15°，buttons=0 时会推着机身蹭到家具上卡住。
+# 充电座出来右边十几厘米就是家具、正前方是椅子：刚出座就转圈会扫到家具卡住（实测撞上后怎么转都转不动），
+# 所以先往左转向屋里的空地、再往前开一段，到中间再跳。左右扭对称、两圈方向相反，跳完还朝着屋里
+DANCE = (
+    ('drive', EXIT_SPEED, EXIT_HOLD),            # 在座上不能原地转，先开出去
+    ('turn', -70), ('drive', EXIT_SPEED, 1.5),   # 转向左边的空地，开到屋子中间
+    ('turn', 360),                               # 转一圈
+    ('turn', 35), ('turn', -35), ('turn', 35), ('turn', -35),    # 扭一扭
+    ('drive', 100, 0.3), ('drive', 100, 0.3),    # 蹦两下
+    ('turn', -360),                              # 反着再转一圈
+)
+DANCE_GAP = 0.25          # 两个动作之间停一下，动作才分得开
+TURN_BASE = 0.7           # 按角度转：起步 + 每度的时间（实测 35° 约 1 秒一下、360° 约 2 秒）
+TURN_PER_DEGREE = 0.004
 
 
 @dataclass
@@ -127,6 +144,7 @@ class PersonTracker:
             self.rest_until = time.monotonic() + left
             LOG.info('Restored dock rest after restart: %.0f s left', left)
         self.off_dock_reported = False
+        self.dancing = False
         self.stopping = threading.Event()
         self.client = None
         state.update(tracking_enabled=True, tracking_status='idle',
@@ -243,6 +261,14 @@ class PersonTracker:
 
     def step(self, now: float | None = None) -> dict | None:
         now = time.monotonic() if now is None else now
+        if self.in_conversation():
+            # 正在聊天就说明人在旁边，只是摄像头没拍到（实测妈妈坐着聊天时它自己回充，
+            # Engine 回充时断开声音和视频，一句回答没播出来）。聊完再从头计时。
+            # 要放在最前面：聊天中“有人在说话”时 allowed() 为假、直接返回，放后面就不刷新（实测
+            # 10-28 早上播报后的对话里一直没刷新，对话一结束马上按“5 分钟没人”回充）
+            self.last_person_at = now
+        if self.dancing:
+            return None
         if not self.allowed():
             self.state.update(tracking_status='paused')
             return None
@@ -294,10 +320,6 @@ class PersonTracker:
         return self._absent_step(now)
 
     def _absent_step(self, now: float) -> dict | None:
-        if self.in_conversation():
-            # 正在聊天就说明人在旁边，只是摄像头没拍到（实测妈妈坐着聊天时它自己回充，
-            # Engine 回充时断开声音和视频，一句回答没播出来）。聊完再从头计时
-            self.last_person_at = now
         absent = now - self.last_person_at
         self.state.update(tracking_absent_seconds=round(absent))
         if not self.left_dock and not self.off_dock_reported:
@@ -378,6 +400,40 @@ class PersonTracker:
         LOG.info('Search found a person (score %.2f); following', score)
         self.state.update(tracking_status='following')
         return {'found': round(score, 2)}
+
+    def dance(self) -> bool:
+        """早上播天气时开心地跳一段（后台跑，不等）。跳的时候不跟人；跳完照常跟人，
+        没人就按老规矩 dock_after 秒后回充。冷却中（刚让它回去充电）不跳。"""
+        with self.lock:
+            if self.dancing or time.monotonic() < self.rest_until or not self.allowed():
+                return False
+            self.dancing = True
+        self.state.update(tracking_status='dancing')
+        threading.Thread(target=self._dance, name='tracker-dance', daemon=True).start()
+        return True
+
+    def _dance(self):
+        LOG.info('Dancing for the morning brief')
+        try:
+            for move in DANCE:
+                if self.stopping.is_set():
+                    break
+                if move[0] == 'drive':
+                    self._drive(move[1], move[2], 'Dance step')
+                    wait = move[2]
+                else:
+                    self._send('cmd', json.dumps({'id': 103001, 'data': {'angle': move[1]}}), 'Dance turn')
+                    wait = TURN_BASE + abs(move[1]) * TURN_PER_DEGREE
+                self.stopping.wait(wait + DANCE_GAP)
+        finally:
+            now = time.monotonic()
+            # 跳完人多半就在旁边：从现在起重新计“多久没见到人”，画面稳了再采信检测
+            self.left_dock = True
+            self.last_person_at = now
+            self.next_look_at = now + SETTLE
+            self.dancing = False
+            self.state.update(tracking_status='waiting', tracking_absent_seconds=0)
+            LOG.info('Dance finished; following as usual')
 
     def rest(self, seconds: float):
         """已经发了回充命令：一段时间内不追人，也不再自己转圈找人/重复回充。"""
