@@ -771,8 +771,11 @@ def main():
         LOG.info('Visual person following enabled')
 
     if config.weather_enabled:
-        supervisor.weather = WeatherBrief(config, lambda pcm, script: supervisor.play_prepared(
-            pcm, script, 'weather', config.weather_name))
+        supervisor.weather = WeatherBrief(
+            config, lambda pcm, script: supervisor.play_prepared(pcm, script, 'weather', config.weather_name),
+            someone_up=tracker.person_seen_within if tracker is not None else None)
+        if tracker is not None:
+            tracker.hold_on_dock = supervisor.weather.pending
         supervisor.weather.start()
 
     if config.memory_enabled:

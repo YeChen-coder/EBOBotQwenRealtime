@@ -2,10 +2,11 @@
 
 妈妈一般 5 点半起床。提前 15 分钟准备好：从 Open-Meteo（免费、不用 Key）取今天的天气和空气质量，
 按固定模板写成播报稿（数字不经过大模型，不会编），再让对话用的同一个千问实时模型、同一个音色
-把稿子念出来，录成音频存到 /data/weather/。到点直接播，不用等模型现场生成；重启也不丢。
+把稿子念出来，录成音频存到 /data/weather/。播的时候不用等模型现场生成；重启也不丢。
 为了不像念新闻：开头一句俏皮话和结尾一句打气的话，每天让千问文字模型现写（不许带数字，
 取不到就从下面的句子里按日子轮换），念的时候也要求活泼、带笑。
-正在聊天、暂停、安静模式时先等着，30 分钟内找到空当再播，过了就不播了。
+5:30 以后等客厅里看到有人起来了才播（妈妈睡在客厅沙发上，不当闹钟用）；
+正在聊天、暂停、安静模式时也先等着。等到 weather_wait_minutes（默认到 7:00）还没播成，今天就不播了。
 """
 from __future__ import annotations
 import asyncio
@@ -28,7 +29,7 @@ from qwen_text import QwenText
 LOG = logging.getLogger('ebo-weather')
 
 PREPARE_AHEAD = timedelta(minutes=15)
-PLAY_WINDOW = timedelta(minutes=30)
+SEEN_RECENTLY = 120  # 这么多秒内看到过人，就算“有人起来了”
 WEEKDAYS = '一二三四五六日'
 
 # WMO 天气代码
@@ -223,7 +224,8 @@ def render(config, script: str) -> bytes:
 
 
 class WeatherBrief:
-    def __init__(self, config, play: Callable[[bytes, str], bool]):
+    def __init__(self, config, play: Callable[[bytes, str], bool],
+                 someone_up: Callable[[float], bool] | None = None):
         self.config = config
         self.play = play  # play(pcm24k, 稿子) -> 是否播出去了（忙的时候返回 False，稍后再试）
         self.tz = ZoneInfo(config.home_timezone) if config.home_timezone else None
@@ -233,6 +235,10 @@ class WeatherBrief:
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
         self.next_prepare_try = 0.0
+        # someone_up(秒) -> 这么多秒内客厅里看到过人没有（视觉跟随给的）；None = 不看，到点就播
+        self.someone_up = someone_up
+        self.wait = timedelta(minutes=config.weather_wait_minutes)
+        self.waiting_logged = None
         self.lock = threading.Lock()
 
     def _now(self) -> datetime:
@@ -270,13 +276,27 @@ class WeatherBrief:
             raise RuntimeError('busy')
         return script
 
+    def _start(self, now: datetime) -> datetime:
+        return now.replace(hour=self.at[0], minute=self.at[1], second=0, microsecond=0)
+
+    def _played_today(self) -> bool:
+        return timers.remaining(self.config.timers_path, 'weather_played') > 0
+
+    def pending(self) -> bool:
+        """到点了、今天还没播：视觉跟随这时看到人先别自己开出充电座，留给播报时的舞（刚出座就原地转会撞上旁边的家具）"""
+        now = self._now()
+        start = self._start(now)
+        # 录音没准备好（取天气失败）就不拦着跟随：不然人起来了它一直不动
+        return (start <= now < start + self.wait and not self._played_today()
+                and self._paths(now)[0].exists())
+
     def tick(self):
         now = self._now()
-        start = now.replace(hour=self.at[0], minute=self.at[1], second=0, microsecond=0)
-        if not (start - PREPARE_AHEAD <= now < start + PLAY_WINDOW):
+        start = self._start(now)
+        if not (start - PREPARE_AHEAD <= now < start + self.wait):
             return
         key = 'weather_played'
-        if timers.remaining(self.config.timers_path, key) > 0:
+        if self._played_today():
             return
         pcm_path, txt_path = self._paths(now)
         if not pcm_path.exists():
@@ -291,21 +311,30 @@ class WeatherBrief:
                 return
         if now < start:
             return
+        # 妈妈睡在客厅沙发上：到点不直接播（等于闹钟），等客厅里看到有人起来了再播。
+        # 夜里躺着睡觉时摄像头认不出人（10-28 日志：整夜没有人体检测，5:34 起来走动才有）；爸爸基本不在客厅。
+        # 等到 weather_wait_minutes 还没人（睡懒觉、不在家），今天就不播了
+        if self.someone_up is not None and not self.someone_up(SEEN_RECENTLY):
+            if self.waiting_logged != now.date():
+                self.waiting_logged = now.date()
+                LOG.info('Weather brief ready; waiting until someone is up in the living room')
+            return
         if self.play(pcm_path.read_bytes(), txt_path.read_text(encoding='utf-8') if txt_path.exists() else ''):
             LOG.info('Played the morning weather brief')
             tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
             timers.save(self.config.timers_path, key, tomorrow.timestamp())
 
     def run(self):
-        while not self.stop_event.wait(20):
+        while not self.stop_event.wait(3):  # 看到人后尽快开口
             try:
                 self.tick()
             except Exception:
                 LOG.exception('Weather brief tick failed')
 
     def start(self):
-        LOG.info('Morning weather brief for %s at %02d:%02d (%s)', self.config.weather_city, *self.at,
-                 self.config.home_timezone or 'local time')
+        LOG.info('Morning weather brief for %s from %02d:%02d (%s), %s', self.config.weather_city, *self.at,
+                 self.config.home_timezone or 'local time',
+                 f'when someone is up, waiting up to {self.wait.seconds // 60} min' if self.someone_up else 'on time')
         self.thread = threading.Thread(target=self.run, name='weather-brief', daemon=True)
         self.thread.start()
 

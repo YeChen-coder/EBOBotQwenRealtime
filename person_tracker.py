@@ -53,10 +53,13 @@ SCAN_CONFIRM_DELAY = 1.0  # 自识别看到人后隔这么久同一方向再看�
 # 实测（10-28 真机）：转圈、扭动都用按角度转——转得准、快（360° 实际转约 1 秒），贴着家具也转得开；
 # 双摇杆连续转（move/vector 的 rx）buttons=1 时 0.3 秒只转约 15°，buttons=0 时会推着机身蹭到家具上卡住。
 # 充电座出来右边十几厘米就是家具、正前方是椅子：刚出座就转圈会扫到家具卡住（实测撞上后怎么转都转不动），
-# 所以先往左转向屋里的空地、再往前开一段，到中间再跳。左右扭对称、两圈方向相反，跳完还朝着屋里
-DANCE = (
+# 所以先往左转向屋里的空地、再往前开一段，到中间再跳。左右扭对称、两圈方向相反，跳完还朝着屋里。
+# 已经不在座上（之前跟着人出来了）就只原地跳，不做出座这段
+DANCE_LEAVE_DOCK = (
     ('drive', EXIT_SPEED, EXIT_HOLD),            # 在座上不能原地转，先开出去
     ('turn', -70), ('drive', EXIT_SPEED, 1.5),   # 转向左边的空地，开到屋子中间
+)
+DANCE = (
     ('turn', 360),                               # 转一圈
     ('turn', 35), ('turn', -35), ('turn', 35), ('turn', -35),    # 扭一扭
     ('drive', 100, 0.3), ('drive', 100, 0.3),    # 蹦两下
@@ -145,6 +148,8 @@ class PersonTracker:
             LOG.info('Restored dock rest after restart: %.0f s left', left)
         self.off_dock_reported = False
         self.dancing = False
+        self.last_seen_wall = 0.0   # 最近一次 Frigate 报告画面里有人（墙上时间）；早上播报据此判断妈妈起来没有
+        self.hold_on_dock: Callable[[], bool] = lambda: False   # 由 runtime 注入：早上播报在等人时不自己出座
         self.stopping = threading.Event()
         self.client = None
         state.update(tracking_enabled=True, tracking_status='idle',
@@ -192,6 +197,18 @@ class PersonTracker:
             if (box[2] - box[0]) * (box[3] - box[1]) < MIN_PERSON_PIXELS:
                 return  # 太小：实测窗户上的剪影（18x69 像素）被认成人，把回充打断了
             self.tracks[object_id] = Detection(object_id, box, now, bool(event.get('stationary')))
+            self.last_seen_wall = time.time()
+
+    def person_seen_within(self, seconds: float) -> bool:
+        return time.time() - self.last_seen_wall <= seconds
+
+    def _fresh_state(self, snapshot: dict) -> bool:
+        # 充电状态定期刷新；只采信最后一次移动之后读到的状态，
+        # 否则刚驶离充电座时的旧状态会被当成还在座上
+        return snapshot.get('robot_state_checked_at', 0) > self.last_move_wall + 5
+
+    def _on_dock(self, snapshot: dict) -> bool:
+        return snapshot.get('robot_charging') is True and self._fresh_state(snapshot)
 
     def decide(self, now: float) -> dict | None:
         """返回本步要发的移动向量，或 None（不动）。"""
@@ -276,13 +293,10 @@ class PersonTracker:
             self.state.update(tracking_status='resting', tracking_rest_seconds=round(self.rest_until - now))
             return None
         snapshot = self.state.snapshot()
-        # 充电状态定期刷新；只采信最后一次移动之后读到的“在充电”，
-        # 否则刚驶离充电座时的旧状态会被当成还在座上
-        fresh_state = snapshot.get('robot_state_checked_at', 0) > self.last_move_wall + 5
-        on_dock = snapshot.get('robot_charging') is True and fresh_state
+        on_dock = self._on_dock(snapshot)
         # “被跟随带离”只记在内存里，程序重启就丢了（实测：重启后机器人在外面待了 46 分钟没回去）。
         # 机器人自己报告“没在充电”也算不在座上；位置不明，所以这种情况不转圈找人、直接回充
-        self.off_dock_reported = snapshot.get('robot_charging') is False and fresh_state
+        self.off_dock_reported = snapshot.get('robot_charging') is False and self._fresh_state(snapshot)
         if on_dock:
             # 回到充电座（不论谁送回去的）：停止计时，直到下次被跟随带离
             self.left_dock = self.searching = False
@@ -297,6 +311,10 @@ class PersonTracker:
             self.search_steps_left = 0
             self.dock_requested_at = None
             if move is None:
+                return None
+            if on_dock and self.hold_on_dock():
+                # 早上播报在等人起来：出座留给播报时的舞，自己先别开出去
+                self.state.update(tracking_status='waiting_for_brief')
                 return None
             if on_dock:
                 # 在座上不能原地转（会卡住），先笔直开出去，下一轮再按人的位置调整
@@ -408,14 +426,16 @@ class PersonTracker:
             if self.dancing or time.monotonic() < self.rest_until or not self.allowed():
                 return False
             self.dancing = True
+        on_dock = self._on_dock(self.state.snapshot())
         self.state.update(tracking_status='dancing')
-        threading.Thread(target=self._dance, name='tracker-dance', daemon=True).start()
+        threading.Thread(target=self._dance, args=(DANCE_LEAVE_DOCK + DANCE if on_dock else DANCE,),
+                         name='tracker-dance', daemon=True).start()
         return True
 
-    def _dance(self):
-        LOG.info('Dancing for the morning brief')
+    def _dance(self, moves):
+        LOG.info('Dancing for the morning brief (%s)', 'from the dock' if len(moves) > len(DANCE) else 'in place')
         try:
-            for move in DANCE:
+            for move in moves:
                 if self.stopping.is_set():
                     break
                 if move[0] == 'drive':

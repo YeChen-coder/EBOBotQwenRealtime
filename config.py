@@ -83,6 +83,7 @@ class Config:
     weather_lon: float = 117.1767
     weather_name: str = '妈妈'   # 播报开头称呼谁
     weather_dance: bool = True   # 播的时候开出充电座跳一段（要开视觉跟随；跳完照常跟人、没人就回充）
+    weather_wait_minutes: float = 90  # 到点后等“客厅里有人起来了”再播，最多等这么久（5:30 + 90 = 7:00）
     weather_dir: str = '/data/weather'
     greet_context: str = ''  # 家人的背景（工作等），写进迎接提示词；隐私，只放 .env
     voice_wake_enabled: bool = True
@@ -227,6 +228,7 @@ class Config:
             'weather_lon': 'EBO_WEATHER_LON',
             'weather_name': 'EBO_WEATHER_NAME',
             'weather_dance': 'EBO_WEATHER_DANCE',
+            'weather_wait_minutes': 'EBO_WEATHER_WAIT_MINUTES',
             'greet_context': 'EBO_GREET_CONTEXT',
             'voice_wake_enabled': 'EBO_VOICE_WAKE_ENABLED',
             'whisper_model': 'EBO_WHISPER_MODEL',
