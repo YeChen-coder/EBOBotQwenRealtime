@@ -357,3 +357,22 @@ I've now had Claude Code put the two-layer architecture back. From now on, devel
 
 4. Takeaways from the Claude Code best practices blog
 Yesterday I finally finished reading Anthropic's Claude Code Best Practices blog post. Anthropic really does have a hacker and engineer spirit, mostly in how it handles control over the context window, giving users a lot of freedom and flexibility. Most of it didn't leave a deep impression on one read, but I did learn one really practical trick: use /btw (by the way) to slip in an instruction without touching the main conversation's context at all. I'm already using /btw to have it check deployment status, see whether something is live, troubleshoot, and check that the day's run is normal. This feature is really great. Reading the docs does pay off.
+
+---
+
+Ugh, not writing things down right after I finish really doesn't work. A couple of days ago I changed some stuff in a daze, and now I've forgotten all of it. Thinking back, these were the main changes:
+
+1. Adjusted the announcement time:
+Looking at the run logs, the weather forecast was originally set to play at 6 a.m. every day (generated 15 minutes ahead). But the logs showed my family usually gets up around 5:30, and by 6 they've sometimes already left the house, so the time really had to change.
+2. Morning announcement now goes through the conversation:
+Before, the morning announcement didn't enter the conversation; it played a pre-recorded audio clip. That broke the context: if my family wanted to talk to it and asked "What did you just say? Say it again," there was no record of it speaking in the context window, so it would answer "I didn't say anything." Now the script is handed to it directly, and it proactively starts a conversation on a schedule each morning, so the follow-up conversation flows naturally.
+3. Phone-call false triggers and quiet mode improvements:
+When I was on the phone with my family, the call audio easily triggered the little bot by mistake, and it would jump in and talk over us. I'd built a quiet mode before, but my family's commands during calls often weren't phrased exactly right, so it didn't work well. This time I made two improvements:
+(a) Relaxed the voice filtering in false-trigger situations: as soon as a family member says something like "quiet" or "shut up," it stays quiet for a while
+(b) Added "Quiet" and "Cancel quiet" buttons to my dashboard
+
+Also, I noticed my family has been going to bed pretty late, so I wanted it to keep them company in the evening and nudge them toward bed. Based on their interests, I added things like news they'd care about. At a scheduled time in the evening, if someone is home and hasn't already been talking to it, it will proactively bring up some gossip or news.
+
+That said, all of the above is very personalized. The workflow is a bit too personalized, so honestly it's not much use as a reference.
+
+I did find another problem, though. Oh, I forgot to mention: in the morning it proactively moves forward a bit and turns around. Because of how my place is set up, its back is against a cabinet when it's on the charging dock, so I adjusted the route so it doesn't start by facing the cabinet and banging its head. That's also very personalized. I think the morning routine is tuned pretty well now, but the evening one, from what I saw in the logs, still isn't great for some reason; it isn't proactive enough. The evening part could use more tuning. But that probably won't happen in the current five-hour session: Claude Code has its limits, the first write already burns a lot of tokens, and I'm busy with something else right now, so I can't be that wasteful in my near-term sessions.
