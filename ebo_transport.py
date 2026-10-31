@@ -23,6 +23,9 @@ LOG = logging.getLogger("ebo-transport")
 STEERING_LEVELS = {"Low": 0, "Medium": 1, "High": 2, "Max": 3}
 REPLY_RETENTION_DAYS = 7
 RECENT_METRICS_LIMIT = 50
+# 一次发给 engine /talk 的 PCM 不能太大：engine 单条消息上限 1 MiB、帧队列只有 10 秒，
+# 整段准备好的音频（早上的天气 24 秒）一次发过去会被断开。切成 0.2 秒一块
+STREAM_SEND_BYTES = 24000 * 2 // 5
 
 
 def _flag(value: object) -> bool:
@@ -493,7 +496,12 @@ class Speaker:
         if start:
             self._start_worker(stream)
         if queued:
-            stream.chunks.put(queued)
+            self._queue_pcm(stream, queued)
+
+    @staticmethod
+    def _queue_pcm(stream: _SpeakerStream, pcm: bytes) -> None:
+        for i in range(0, len(pcm), STREAM_SEND_BYTES):
+            stream.chunks.put(pcm[i:i + STREAM_SEND_BYTES])
 
     def _handle_stream_status(self, stream: _SpeakerStream, raw: str) -> str:
         try:
@@ -625,7 +633,7 @@ class Speaker:
                 stream.pending.clear()
                 self._start_worker(stream)
                 if queued:
-                    stream.chunks.put(queued)
+                    self._queue_pcm(stream, queued)
             stream.chunks.put(None)
         threading.Thread(
             target=self._finalize_stream,
