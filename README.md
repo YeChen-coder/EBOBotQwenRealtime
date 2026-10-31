@@ -21,7 +21,7 @@ A home voice assistant for an Enabot EBO robot that **doesn't need a wake word**
 
 - **Standby listening on the device.** Local Whisper (faster-whisper, CPU) transcribes speech segment by segment. Saying a wake word ("猫猫", "小朋友") wakes it instantly. Anything else goes to a small model (`qwen-plus`), which decides whether the speech was meant for the robot, so TV dialogue and family members talking to each other are ignored.
 - **Realtime conversation** with Qwen `qwen3.8-omni-flash-realtime`, including built-in web search. Server VAD is turned off and turn-taking is detected locally, so the robot's own voice can't interrupt it.
-- **Visual following (optional).** Frigate (YOLOv9-s, OpenVINO on CPU) detects people in the robot's camera feed. The robot turns toward them and approaches. After 5 minutes with nobody in view it does a search spin and returns to the dock. "Go charge" sends it home and keeps it there for a rest period.
+- **Visual following (optional).** Frigate (YOLOv9-s, ONNX on the NVIDIA GPU) detects people in the robot's camera feed. The robot turns toward them and approaches. After 5 minutes with nobody in view it does a search spin and returns to the dock. "Go charge" sends it home and keeps it there for a rest period.
 - **Dashboard** at `http://127.0.0.1:8099/` with status, live video (WebRTC), conversations and logs.
 
 The project is **self-contained**: the robot adapter (EBO Engine), person detection (Frigate), MQTT and the assistant all live here. It does not depend on `ebo-ai-home`.
@@ -157,7 +157,7 @@ Split into local and cloud:
 | Filter out non-speech before transcribing | **Silero VAD** (small model bundled with faster-whisper) |
 | Traditional → Simplified Chinese | OpenCC (text conversion tool, not a model) |
 | Match wake words by pronunciation | pypinyin to pinyin + pronunciation-similarity rules (tools, not models) |
-| Detect people in the video (normal following) | **YOLOv9-s**, 320×320 input, running in **Frigate** on CPU via OpenVINO |
+| Detect people in the video (normal following) | **YOLOv9-s**, 320×320 input, running in **Frigate** on the NVIDIA GPU (ONNX / CUDA), video decoded on the GPU too |
 | Double-check during search spins | The same **YOLOv9-s 320** model, running on CPU via onnxruntime |
 | Robot microphone noise reduction | Built-in noise reduction of the Agora SDK, enabled in the Engine |
 
@@ -205,7 +205,7 @@ Also, before the robot's microphone audio enters any of the above, it goes throu
 
 **A. Watching for people**
 1. **Get the video**: the Engine turns the robot camera feed into a video stream, **640×360 at 5 fps**.
-2. **Detect people**: **Frigate** runs **YOLOv9-s (320×320 input, OpenVINO, CPU)** on the regions of the frame that changed.
+2. **Detect people**: **Frigate** runs **YOLOv9-s (320×320 input, ONNX, NVIDIA GPU)** on the regions of the frame that changed.
 3. **Threshold for "person"**: single-frame score ≥ 0.5 to start tracking; median score over several frames ≥ **0.6**; box area ≥ **2500 pixels** (tiny ones, like silhouettes outside the window, don't count). Only then is our program notified.
 4. **Our program filters again**: drop boxes that are too small, drop "ghost boxes" that wrap around a real person; keep following the current person, or if there isn't one, pick the largest person in the frame.
 
@@ -376,3 +376,8 @@ Also, I noticed my family has been going to bed pretty late, so I wanted it to k
 That said, all of the above is very personalized. The workflow is a bit too personalized, so honestly it's not much use as a reference.
 
 I did find another problem, though. Oh, I forgot to mention: in the morning it proactively moves forward a bit and turns around. Because of how my place is set up, its back is against a cabinet when it's on the charging dock, so I adjusted the route so it doesn't start by facing the cabinet and banging its head. That's also very personalized. I think the morning routine is tuned pretty well now, but the evening one, from what I saw in the logs, still isn't great for some reason; it isn't proactive enough. The evening part could use more tuning. But that probably won't happen in the current five-hour session: Claude Code has its limits, the first write already burns a lot of tokens, and I'm busy with something else right now, so I can't be that wasteful in my near-term sessions.
+
+---
+
+Moving Frigate to the GPU
+Why this change? My computer started stuttering while I was gaming. It turned out Frigate was decoding video and running person detection on the CPU, eating up to ~9 cores. So I did a round of optimization: Frigate now decodes video (NVDEC) and runs YOLOv9 detection (ONNX / CUDA) on the RTX 4070 SUPER, and the CPU is left for games. Detection takes about 5 ms per frame on the GPU.

@@ -3,14 +3,15 @@ mqtt:
   host: mosquitto
   port: 1883
 
-# Portable CPU decode/detection. EBO Engine supplies its existing RTSP stream.
+# 解码和检测都走 NVIDIA 显卡（CUDA/NVDEC），不占 CPU。EBO Engine 提供 RTSP 流。
 ffmpeg:
   path: "7.0"
+  hwaccel_args: preset-nvidia
 
+# ONNX 检测器在 stable-tensorrt 镜像里会自动用 CUDA/TensorRT
 detectors:
-  openvino:
-    type: openvino
-    device: CPU
+  onnx:
+    type: onnx
 
 # YOLOv9-s 320（Frigate 官方推荐的 OpenVINO 模型）。原自带的 SSDLite MobileNet v2
 # 在机器人贴地仰拍的画面上漏检半身的人、还会把搭着衣服的椅子认成人。

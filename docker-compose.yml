@@ -98,8 +98,17 @@ services:
     stop_grace_period: 30s
     shm_size: "256mb"
     depends_on: [ebo-engine, mosquitto]
+    # 解码和人体检测都放到 NVIDIA 显卡上，别和游戏抢 CPU（镜像是 stable-tensorrt，自带 CUDA）
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     environment:
       FRIGATE_EBO_RTSP_URL: rtsp://ebo-engine:8554/ebo
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
       TZ: ${TZ:-America/Toronto}
     volumes:
       - ./data/frigate:/config
