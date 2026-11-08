@@ -101,6 +101,16 @@ class RuntimeState:
                 source_ok = source_status == 'receiving' and engine.get('source_audio_ok') is True
                 if source_ok and not all(fresh(engine.get(k)) for k in ('last_packet_at', 'last_pcm_at')):
                     source_ok, source_status = False, 'source_stale'
+        # "Played" only means handed to an Agora sender (11-08: robot mute 13 h, logs all fine).
+        # The Engine checks that sender belongs to the live, published connection and that Agora
+        # reports bytes going out; a fault stays listed for 30 min after it was fixed.
+        talk = engine.get('talk') if isinstance(engine.get('talk'), dict) else {}
+        speaker_status, speaker_error, speaker_current = 'not_monitored', '', False
+        if (data['engine_audio_monitor_enabled'] and not data['engine_audio_error'] and talk
+                and fresh(talk.get('observed_at')) and fresh(data['engine_audio_checked_at'])):
+            speaker_status = str(talk.get('status', 'unknown'))
+            speaker_current = talk.get('ok') is False
+            speaker_error = speaker_status if speaker_current else str(talk.get('last_fault') or '')
         starting = now - data['started_at'] < data['media_startup_grace_seconds']
         media_ok = audio and source_ok
         if not data['assistant_enabled']:
@@ -109,7 +119,7 @@ class RuntimeState:
             data['speech_input_blocked'] = True
         session_ok = data['session_state'] in {'standby', 'saving_memory', 'paused'} or (data['session_state'] == 'active' and data['realtime_connected'])
         data.update(
-            ok=data['listener_ready'] and media_ok and session_ok,
+            ok=data['listener_ready'] and media_ok and session_ok and not speaker_current,
             uptime_seconds=round(now-data.pop('started_at'), 1), media_starting=starting,
             realtime_session_started_at=data['session_started_at'],
             realtime_session_age_seconds=age(data['session_started_at']) if data['session_state'] == 'active' else None,
@@ -118,5 +128,10 @@ class RuntimeState:
             audio_ready=media_ok, visual_available=video,
             transport_media_ok=video_transport and audio, source_audio_ok=source_ok, source_audio_status=source_status,
             source_video_ok=source_video_ok, source_video_status=source_video_status,
+            speaker_output_status=speaker_status, speaker_output_ok=not speaker_current,
+            speaker_output_error=speaker_error, speaker_output_fault_current=speaker_current,
+            speaker_output_fault_at=talk.get('last_fault_at') if speaker_error else None,
+            speaker_output_fault_healed=bool(talk.get('last_fault_healed')) and not speaker_current,
+            speaker_output_sent_bitrate=talk.get('sent_bitrate') if speaker_status != 'not_monitored' else None,
         )
         return data

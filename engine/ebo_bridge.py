@@ -33,6 +33,7 @@ import paho.mqtt.client as mqtt
 import ebo_cloud
 from pcm_talk import PcmTalkServer
 from audio_health import AudioHealth
+from talk_health import TalkHealth, tx_fault
 
 from agora.rtc.agora_service import AgoraService, AgoraServiceConfig
 from agora.rtc.agora_base import (
@@ -299,6 +300,15 @@ class Bridge:
         self._tx_queue = []            # queued 'talk' sources
         self._talk_stop = False        # set by talk/stop to end a live push-to-talk
         self._pcm_stream = None         # active low-latency PCM stream, if any
+        # Which connection the TX loop really sends into ("N ms played" can't tell; 11-08).
+        self.talk_health = TalkHealth()
+        self._tx_gen = 0               # bumps per TX start; an older loop exits even if restarted fast
+        self._tx_thread = None
+        self._tx_rtc = None            # connection the running loop's sender belongs to
+        self._tx_sender = None
+        self._published_rtc = None     # connection publish_audio() was last called on
+        self._publish_rc = None
+        self._talk_heal_at = -60.0
         self._pcm_server = None
         self._tx_mode = "silence"      # DIAG: idle TX content — "silence" | "tone"
         self._tx_start_t = 0.0         # DIAG: when we started publishing (to time mic-open)
@@ -363,6 +373,7 @@ class Bridge:
     def connect_agora(self):
         s = self.s
         self.audio_health = AudioHealth()
+        self.talk_health.new_connection()
 
         class RtcObs(IRTCConnectionObserver):
             def on_connected(o, conn, info, reason):
@@ -671,11 +682,45 @@ class Bridge:
             return
 
         audio_health = self.audio_health
+        talk_health = self.talk_health
         bridge, rtc = self, self.rtc
 
         class LUObs(IRTCLocalUserObserver):
             _stat_n = [0]
             _video_stat_n = 0
+            _local_stat_n = 0
+            _local_sending = None
+
+            # Our own published track (talk -> robot speaker). Old connections are ignored, like
+            # the video stats: only the current connection's numbers say anything about now.
+            def on_local_audio_track_statistics(o, lu, stats):
+                if bridge.rtc is not rtc or stats is None:
+                    return
+                bitrate = int(getattr(stats, "sent_bitrate", 0) or 0)
+                talk_health.local_stats(bitrate)
+                o._local_stat_n += 1
+                if o._local_stat_n <= 3 or (bitrate > 0) != o._local_sending:
+                    log("[talk-health] local audio stats: sent_bitrate=%s sr=%s codec=%s tx=%s" % (
+                        bitrate, getattr(stats, "sent_sample_rate", "?"),
+                        getattr(stats, "internal_codec", "?"), bridge._tx_run))
+                o._local_sending = bitrate > 0
+
+            def on_audio_publish_state_changed(o, lu, channel, old, new, elapsed):
+                # 0 idle, 1 no-publish, 2 publishing, 3 published (seen: 1->2->3 on publish)
+                log("[talk-health] audio publish state %s->%s (current=%s)"
+                    % (old, new, bridge.rtc is rtc))
+                if bridge.rtc is rtc:
+                    talk_health.set_publish_state(new)
+
+            def on_audio_track_publish_success(o, lu, track):
+                log("[talk-health] audio track publish success (current=%s)" % (bridge.rtc is rtc))
+
+            def on_audio_track_publication_failure(o, lu, track, error):
+                log("[talk-health] audio track publication FAILED error=%s (current=%s)"
+                    % (error, bridge.rtc is rtc), level="error")
+
+            def on_audio_track_unpublished(o, lu, track):
+                log("[talk-health] audio track unpublished (current=%s)" % (bridge.rtc is rtc))
 
             def on_remote_video_track_statistics(o, lu, track, stats):
                 if bridge.rtc is not rtc or not bridge.video:
@@ -847,17 +892,33 @@ class Bridge:
         sender = getattr(self.rtc, "_audio_sender", None) if self.rtc else None
         if not sender:
             return
+        rtc = self.rtc
         with self._talk_lock:
             if self._tx_run:
                 return
             self._tx_run = True
-        self._tx_start_t = time.time()
+            self._tx_gen += 1
+            gen = self._tx_gen
+            self._tx_start_t = time.time()
+            # Recorded with _tx_run under the lock, so a health check never sees half a start;
+            # publish_rc None / thread None = still starting (the SDK call stays outside the lock).
+            self._tx_rtc, self._tx_sender = rtc, sender
+            self._published_rtc, self._publish_rc = rtc, None
+            self._tx_thread = None
         try:
-            self.rtc.publish_audio()
-            log("[audio-tx] publishing our audio track (mode=%s)" % self._tx_mode)
+            rc = rtc.publish_audio()
         except Exception as e:
-            log("[audio-tx] publish_audio failed:", e)
-        threading.Thread(target=self._audio_tx_loop, args=(sender,), daemon=True).start()
+            rc = "exception: %s" % e
+        thread = threading.Thread(target=self._audio_tx_loop, args=(sender, gen),
+                                  name="audio-tx", daemon=True)
+        with self._talk_lock:
+            if gen == self._tx_gen:
+                self._publish_rc, self._tx_thread = rc, thread
+        thread.start()
+        if rc == 0:
+            log("[audio-tx] publishing our audio track (mode=%s)" % self._tx_mode)
+        else:
+            log("[audio-tx] publish_audio failed (rc=%s)" % rc, level="error")
 
     def _talk_ready(self):
         """Whether the current RTC session can publish PCM to the robot."""
@@ -925,10 +986,51 @@ class Bridge:
         except Exception as e:
             log("[tx-test] error:", e)
 
-    def _audio_tx_loop(self, sender):
+    def _talk_path_fault(self):
+        """'' if audio the TX loop sends would reach the current connection; else a fault code."""
+        with self._talk_lock:
+            rtc = self.rtc
+            thread = self._tx_thread
+            return tx_fault(
+                tx_running=self._tx_run, tx_alive=thread is None or thread.is_alive(),
+                tx_rtc=self._tx_rtc, tx_sender=self._tx_sender,
+                rtc=rtc, rtc_sender=getattr(rtc, "_audio_sender", None) if rtc else None,
+                published_rtc=self._published_rtc, publish_rc=self._publish_rc,
+                # Grace counts from the later of TX start and the last (re)connect: stats pause
+                # across an RTC reconnect and must not read as "not sending".
+                rtc_connected=self.rtc_state == "connected",
+                tx_started_at=max(self._tx_start_t, self._session_started_at),
+                last_sending_at=self.talk_health.last_sending_at,
+            )
+
+    def _check_talk_path(self, when):
+        """Catch "logs say played, robot silent" before it eats replies: record the fault for the
+        dashboard, then restart the TX loop on the current connection (what the 11-08 fix does on
+        renewal, for whatever the next cause is)."""
+        fault = self._talk_path_fault()
+        if not fault:
+            return ""
+        # One restart a minute: a fault that survives it stays on the dashboard (status) without
+        # restarting the TX loop every 5 s.
+        if time.monotonic() - self._talk_heal_at < 60:
+            return fault
+        self._talk_heal_at = time.monotonic()
+        self._stop_audio_tx()
+        self._start_audio_tx()
+        # not_sending can only be re-judged from Agora stats after the grace period.
+        healed = fault != "not_sending" and not self._talk_path_fault()
+        self.talk_health.record_fault(fault, healed=healed)
+        log("[talk-health] %s at %s: %s — TX restarted on the current connection, %s" % (
+            fault, when, self.talk_health.last_fault_detail,
+            "now OK" if healed else "re-checking" if fault == "not_sending" else "STILL BROKEN"),
+            level="error")
+        self._publish_audio_health()
+        return fault
+
+    def _audio_tx_loop(self, sender, gen):
         frame_bytes = (AUDIO_RATE // 50) * 2             # 20 ms mono s16le
         silence = bytes(frame_bytes)
-        while self._tx_run:
+        while self._tx_run and gen == self._tx_gen:
             with self._talk_lock:
                 pcm_stream = self._pcm_stream
             if pcm_stream:
@@ -982,7 +1084,7 @@ class Bridge:
                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                     n = 0
                     _t0 = time.time()
-                    while self._tx_run and not self._talk_stop:
+                    while self._tx_run and gen == self._tx_gen and not self._talk_stop:
                         chunk = proc.stdout.read(frame_bytes)
                         if not chunk:
                             break
@@ -1042,6 +1144,7 @@ class Bridge:
             pass
         if not self._tx_run:
             self._start_audio_tx()
+        self._check_talk_path("talk-stream start")
         log("[talk-stream] ready:", stream.stream_id)
 
     def _release_pcm_stream(self, stream):
@@ -1115,6 +1218,7 @@ class Bridge:
         # if the TX loop isn't running (talk enabled but camera off), start it now
         if not self._tx_run:
             self._start_audio_tx()
+        self._check_talk_path("talk")
 
     def _camera_feed(self, on):
         """Turn our RTSP feed on/off. The robot streams whenever we're present in RTC; this
@@ -2343,6 +2447,8 @@ class Bridge:
             self.listen_on, self.rtc_state == "connected", self.audio_enabled
         )
         health["other_viewers"] = len(self.other_viewers)
+        # Rides along with audio_health so the panel API and the assistant need no new topic.
+        health["talk"] = self.talk_health.snapshot(self._talk_path_fault(), self._tx_run)
         if self.mqtt:
             self.mqtt.publish("%s/audio_health" % NODE, json.dumps(health), retain=True)
         if health["status"] != self._last_audio_health_status:
@@ -2495,6 +2601,7 @@ class Bridge:
             while not self.stop.wait(1):
                 if time.monotonic() - last_audio_health >= 5:
                     last_audio_health = time.monotonic()
+                    self._check_talk_path("periodic check")
                     self._publish_audio_health()
                     self._publish_video_health()
                 # Core media watchdog. This belongs in the EBO transport layer, not in the OpenAI

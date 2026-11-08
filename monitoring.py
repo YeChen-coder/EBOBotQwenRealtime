@@ -269,6 +269,11 @@ const HINTS = () => ({
   monitor_stale: T('Engine 音频状态过时', 'Engine audio status is stale'),
   no_source_packets: T('机器人没发来音频（可能在休眠）', 'No audio from the robot (it may be asleep)'),
   source_stale: T('机器人音频中断', 'Robot audio stopped'),
+  // 机器人喇叭：日志说"播了"，但声音没真正发出去（11-08 哑了 13 小时就是这种）
+  stale_sender: T('机器人没声音：回复推进了已经断开的旧连接', 'Robot is silent: replies go into an old, closed connection'),
+  not_published: T('机器人没声音：我们的声音没在当前连接上发布', 'Robot is silent: our audio is not published on the current connection'),
+  tx_loop_dead: T('机器人没声音：推声音的线程停了', 'Robot is silent: the audio sending thread died'),
+  not_sending: T('机器人没声音：声网显示没有声音发出去', 'Robot is silent: Agora reports no audio being sent'),
 });
 const explain = v => { const k = String(v).split(':')[0], h = HINTS(); return h[k] ? `${h[k]} <small>(${esc(v)})</small>` : esc(v); };
 
@@ -276,6 +281,19 @@ function card(title, badge, rows) {
   return `<div class="card"><h2>${title}${badge || ''}</h2>${rows.map(([k, v]) => `<div class="row"><span>${k}</span><span>${v}</span></div>`).join('')}</div>`;
 }
 function tag(text, cls) { return `<span class="badge ${cls}">${esc(text)}</span>`; }
+
+// 当前的故障直接显示；已经自动修好的，30 分钟内还留着，免得没人看到
+function speakerError(h) {
+  if (!h.speaker_output_error || h.speaker_output_fault_current) return h.speaker_output_error;
+  const at = h.speaker_output_fault_at ? clock(h.speaker_output_fault_at) : '?';
+  return h.speaker_output_error + ': ' + (h.speaker_output_fault_healed
+    ? T(`${at} 出现过，已自动重启推声音，现在正常`, `seen at ${at}, sending restarted, OK now`)
+    : T(`${at} 出现过，已自动重启推声音`, `seen at ${at}, sending restarted`));
+}
+const speakerTag = h => h.speaker_output_status === 'not_monitored' ? '—'
+  : !h.speaker_output_ok ? tag(T('没有声音发出','No sound going out'), 'bad')
+  : h.speaker_output_status === 'ok' ? tag(T('正常','OK') + (h.speaker_output_sent_bitrate ? ` · ${h.speaker_output_sent_bitrate} kbps` : ''), 'ok')
+  : tag(T('空闲','Idle'), 'idle');
 
 function render(h) {
   $('overall').className = 'badge ' + (h.ok ? 'ok' : h.media_starting ? 'warn' : 'bad');
@@ -299,7 +317,7 @@ function render(h) {
                          : tag(audioOk ? T('正常','OK') : T('异常','Error'), audioOk ? 'ok' : 'bad');
   const errors = [[T('助手','Assistant'), h.last_error], [T('音频采集','Audio capture'), h.audio_capture_error], [T('Engine 音频','Engine audio'), h.engine_audio_error],
                   [T('唤醒','Wake'), h.voice_wake_last_error], [T('视觉跟随','Person following'), h.tracking_last_error],
-                  [T('机器人状态','Robot status'), h.robot_state_error]].filter(([, v]) => v);
+                  [T('机器人状态','Robot status'), h.robot_state_error], [T('机器人喇叭','Robot speaker'), speakerError(h)]].filter(([, v]) => v);
   const wakeState = !h.voice_wake_enabled ? tag(T('关闭','Off'),'idle') : h.voice_wake_transcribing ? tag(T('识别中','Transcribing'),'info')
                     : h.voice_wake_listening ? tag(T('监听中','Listening'),'ok') : tag(T('未监听','Not listening'),'idle');
   const quietLeft = h.quiet_until ? Math.ceil((h.quiet_until - Date.now() / 1000) / 60) : 0;
@@ -330,7 +348,8 @@ function render(h) {
     card(T('待机唤醒','Standby wake'), quietTag || wakeState, [
       [T('唤醒方式','How to wake'), esc(wakeHow)], [T('候选语句','Candidate phrases'), h.voice_wake_candidates],
       [T('唤醒成功','Woken'), h.voice_wake_accepted], [T('被拒绝','Rejected'), h.voice_wake_rejected], [T('上次唤醒','Last wake'), ago(h.last_voice_wake_at)]]),
-    card(T('播放 / 回复','Playback / replies'), tag(h.speaker_stream_status, h.speaker_stream_failures ? 'warn' : 'idle'), [
+    card(T('播放 / 回复','Playback / replies'), tag(h.speaker_stream_status, !h.speaker_output_ok ? 'bad' : h.speaker_stream_failures ? 'warn' : 'idle'), [
+      [T('喇叭输出（声网实际发送）','Speaker output (actually sent via Agora)'), speakerTag(h)],
       [T('已保存回复','Replies saved'), h.assistant_outputs_persisted], [T('上次回复','Last reply'), ago(h.last_assistant_output_at)],
       [T('用户转录条数','User transcripts'), h.user_transcripts_received], [T('流式失败','Stream failures'), h.speaker_stream_failures],
       [T('改用 URL 播放','URL playback fallbacks'), h.speaker_stream_fallbacks], [T('请求回复次数','Responses requested'), h.manual_responses_requested]]),

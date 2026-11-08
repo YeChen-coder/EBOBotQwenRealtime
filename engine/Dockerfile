@@ -59,7 +59,7 @@ WORKDIR /app
 # image always contains the current code. VERSION.txt is DERIVED from config.yaml at build so
 # it can never drift out of sync with the released version (a manual bump was easy to forget,
 # causing a false "stale image" warning). run.sh logs it to prove which version is live.
-COPY config.yaml ebo_bridge.py ebo_cloud.py ebo_sign.py ebo_video.py ebo_log.py pcm_talk.py audio_health.py panel.py ebo_mcp.py log_tee.py run.sh /app/
+COPY config.yaml ebo_bridge.py ebo_cloud.py ebo_sign.py ebo_video.py ebo_log.py pcm_talk.py audio_health.py talk_health.py panel.py ebo_mcp.py log_tee.py run.sh /app/
 # Bundle the companion integration so run.sh can install it into /homeassistant/custom_components.
 COPY ha_integration /app/ha_integration
 RUN sed -n 's/^version:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}.*/\1/p' /app/config.yaml > /app/VERSION.txt \
