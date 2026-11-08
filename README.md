@@ -189,14 +189,40 @@ Okay, here it is step by step, with the model or tool used at each step.
 8. **No wake word** → ask **`qwen-plus`** "is this for the robot?", also looking at what it heard in the last minute, to block out the TV. Yes → wake.
 
 **B. During a conversation**
+
+The full path of one sentence (Toronto is the computer running the program):
+
+```
+Family home in China: a family member speaks
+  │  ① robot microphone → Agora → Toronto (received by the Engine)
+  ▼
+Toronto: the program
+  │  ② locally it only decides "is someone talking, have they finished" (WebRTC VAD)
+  │     while they talk, the audio is compressed to Opus and pushed to ↓
+  ▼
+Aliyun Beijing: qwen3-asr-flash-realtime speech recognition → text sent back to Toronto
+  ▼
+Toronto: the program's checks
+  │  ③ no content / just noise → no answer
+  │     "shut up" or "go charge" type sentences, or unsure whether it's talking to the robot
+  │     → ask qwen-plus in Beijing once more
+  │     (a reply within 20 s of the robot speaking counts as talking to it, no need to ask)
+  ▼
+Aliyun Beijing: qwen3.8-omni-flash-realtime conversation model
+  │  ④ the program sends the TEXT; the model streams the spoken answer back to Toronto as it goes
+  ▼
+Toronto → Engine → Agora → the robot's speaker at the family home in China
+     ⑤ each bit of audio is forwarded as soon as it arrives, without waiting for the whole sentence
+```
+
 1. **Decide the sentence is finished**: WebRTC VAD (local).
-2. **Send the audio to the conversation model**: cloud **`qwen3.8-omni-flash-realtime`**.
-3. **Get the text of this sentence**: transcribed by cloud **`qwen3-asr-flash-realtime`**; if it's not back in 3 seconds, local **Whisper small** listens again.
+2. **Send the audio to speech recognition while the person talks**: cloud **`qwen3-asr-flash-realtime`**, compressed to Opus first.
+3. **Get the text of this sentence**: the recognition result comes back once they finish; if it's not back in 3 seconds, local **Whisper small** listens again.
 4. **No content** → don't answer.
 5. **"Shut up" type** (confirmed by **`qwen-plus`**) → don't answer, end the conversation, enter quiet mode. Same when the model itself promises to stay quiet ("I'll just sit here quietly"; local keywords, confirmed by **`qwen-plus`**): the session ends once that sentence finishes and quiet mode starts, instead of staying open until the idle timeout.
 6. **Not talking to it** (judged by **`qwen-plus`**, e.g. TV audio) → don't answer.
 7. **"Go charge" type** (confirmed by **`qwen-plus`**) → return to the dock, no following for 18 minutes, and answer as usual. If it says "I'm heading back now" by itself, a local rule makes it actually go back too.
-8. **Normal answer**: **`qwen3.8-omni-flash-realtime`** answers directly in voice, using the **Long'an Lingxin (`longanlingxin`)** voice, with web search when needed.
+8. **Normal answer**: the text of the sentence is sent to **`qwen3.8-omni-flash-realtime`**, which answers directly in voice, using the **Long'an Lingxin (`longanlingxin`)** voice, with web search when needed.
 9. **No real interaction for 4.5 minutes** → end the conversation, back to standby.
 
 Also, before the robot's microphone audio enters any of the above, it goes through **Agora SDK noise reduction**, which happens in the Engine.
