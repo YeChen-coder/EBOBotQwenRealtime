@@ -410,10 +410,14 @@ Why this change? My computer started stuttering while I was gaming. It turned ou
 
 ---
 
-Why the Qwen connection didn't switch from WebSocket to WebRTC (11-05)
-It started with the TV being too loud and me looking for noise reduction. v1 used OpenAI, which has far-field noise reduction (far_field), so even with the TV on it rarely got falsely triggered. Qwen's realtime API has no such setting. But Qwen's docs say that connecting over WebRTC comes with "built-in echo cancellation and noise reduction", and we use WebSocket now, so I considered switching.
+Looking for noise reduction: GLM is too expensive, and the Qwen connection stays off WebRTC (11-05)
+It started with the TV being too loud and me looking for noise reduction. v1 used OpenAI, which has far-field noise reduction (far_field), so even with the TV on it rarely got falsely triggered. Qwen's realtime API has no such setting.
 
-In the end I didn't, for three reasons:
+First I looked at other providers: Zhipu's GLM-Realtime has built-in noise reduction and a far-field mode. But it charges by the minute (¥0.18–0.3 per minute), while Qwen charges by tokens. Based on my family's actual usage, GLM would cost more than 10 times as much, possibly dozens of times more. The robot is silent most of the time, so per-minute billing is a bad deal, and I didn't use it.
+
+Then Qwen itself: its docs say that connecting over WebRTC comes with "built-in echo cancellation and noise reduction", and we use WebSocket now, so I considered switching.
+
+In the end I didn't switch either, for three reasons:
 1. The noise reduction most likely wouldn't apply: the docs' example relies on a browser, while on a server we can only use a Python library (aiortc), and that noise reduction is probably the browser's own. Even if it worked, it would likely be about the same as the Agora noise reduction that's already on.
 2. A big rewrite: WebRTC doesn't support manual mode, so audio goes straight into the conversation model. "Deciding whether it's being talked to", "sending the text to the model" and "pushing audio to the robot's speaker" would all have to be rebuilt.
 3. More expensive: right now the conversation model gets text (¥1.5 per million tokens); after switching it would get audio (¥6 per million tokens).
