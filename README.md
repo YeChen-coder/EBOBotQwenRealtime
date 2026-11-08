@@ -427,3 +427,17 @@ After the speech recognition problem above was fixed, the robot's text replies s
 The problem: the Agora call credentials the robot uses expire after about 24 hours, so the program renews them automatically every 20 hours, disconnecting and reconnecting when it does. The renewal code skipped a step: it didn't first stop the thread that pushes audio to the robot. That thread kept pushing audio into the old, already-closed connection without any error, so the logs still said "played N ms", while the new connection never actually made a sound. After the renewal on the evening of 11-07 (Toronto time), the robot was mute for about 13 hours. When my family said in the morning that it wasn't talking, it was really two problems at once: slow recognition and no sound.
 
 The fix: stop the old audio thread before renewing, the same way it's already done when waking the robot up. After a restart my family tried it and could hear it answer again.
+
+---
+
+Moving to a cloud server in China: how big a machine, and how much (11-08)
+The problem: the program runs on my side, far from both the robot and Aliyun, and it gets hit by cross-border throttling in the evening. So I plan to move it to a cloud server at Aliyun in Beijing. Before moving, I needed to know how big a machine it needs, what it costs per month, and whether memory use can come down.
+
+What I found:
+- Size: the three main containers use about 4 GB of memory right now. 4 cores / 8 GB is the safe choice; after some slimming down, 2 cores / 4 GB will very likely be enough. It has to be an x86 machine (the Agora SDK the robot uses only comes for x86), and there's no need to pay for a GPU.
+- Price: an Aliyun lightweight server with 4 cores / 8 GB is about 220 yuan a month if paid monthly, which is the most expensive way to buy it; paid yearly it's about 1159 yuan, under 100 yuan a month. 2 cores / 4 GB is about 199 yuan a year on promotion. No three-year plans.
+- Merging the containers into one or two doesn't save memory. A container just keeps programs apart and uses almost no memory itself; the memory is used by the programs inside, and putting them together adds up to the same amount.
+- What actually saves memory: moving Frigate from the GPU back to the CPU. Right now its detection process uses 1.1 GB, mostly because it loads the GPU libraries; on the CPU it should need only two or three hundred MB, saving about 800 MB. Switching Whisper to a smaller model saves a few hundred MB more. Detection on the CPU is just as accurate, only a few tens of milliseconds slower per frame, which you can't notice when it's following someone.
+- Why there are two copies of the YOLO model: Frigate only looks at the parts of the picture that move, and it has to see a person several times in a row before it counts, so someone lying still on the sofa often gets missed. So when the robot turns around looking for someone, the assistant takes its own snapshot at each stop and looks again carefully with the same YOLO. Same eyes, two ways of using them, so this copy stays.
+
+Next: rent a pay-by-the-hour machine for two or three days, run the whole thing on it for one night limited to 2 cores / 4 GB, and buy 2 cores / 4 GB if it holds up. The detailed plan is in docs/china-cloud-plan.md.
