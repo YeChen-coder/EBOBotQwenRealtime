@@ -381,3 +381,14 @@ I did find another problem, though. Oh, I forgot to mention: in the morning it p
 
 Moving Frigate to the GPU
 Why this change? My computer started stuttering while I was gaming. It turned out Frigate was decoding video and running person detection on the CPU, eating up to ~9 cores. So I did a round of optimization: Frigate now decodes video (NVDEC) and runs YOLOv9 detection (ONNX / CUDA) on the RTX 4070 SUPER, and the CPU is left for games. Detection takes about 5 ms per frame on the GPU.
+
+---
+
+The robot suddenly stopped talking (11-08)
+My family said the robot was ignoring them, and the dashboard was full of "No transcript within 8s; ignoring turn".
+
+The problem: the program runs on my side (Toronto), and what my family says has to be sent from here to Aliyun in Beijing to be turned into text. In the Chinese evening (after 5 p.m. Beijing time) the cross-border link gets throttled, and uploads from here to Beijing drop to about 35 KB/s, while the original audio format (PCM) needs about 43 KB every second. What can't get through keeps piling up, the text comes back later and later, and in the end it was more than 30 seconds late. The program waits 8 seconds for the text; when nothing arrives it assumes nobody spoke, so the robot didn't answer anything.
+
+The fix: compress the audio to Opus before sending it to speech recognition. It's about a tenth of the data, and the recognized text is just as accurate. In a test with 90 seconds of nonstop speech, the text always came back within 2 seconds; before, it took up to 26 seconds and the connection even dropped midway.
+
+Once the program moves to a server in China, this problem goes away: the robot, the program and Aliyun will all be in China, with no need to go through the throttled cross-border link.
