@@ -438,6 +438,8 @@ The fix: compress the audio to Opus before sending it to speech recognition. It'
 
 Once the program moves to a server in China, this problem goes away: the robot, the program and Aliyun will all be in China, with no need to go through the throttled cross-border link.
 
+Full story (timeline, how it was found, technical details): [docs/incident-2026-11-08-robot-silent.md](docs/incident-2026-11-08-robot-silent.md)
+
 ---
 
 The robot replied in text, but with no sound (11-08)
@@ -445,7 +447,9 @@ After the speech recognition problem above was fixed, the robot's text replies s
 
 The problem: the Agora call credentials the robot uses expire after about 24 hours, so the program renews them automatically every 20 hours, disconnecting and reconnecting when it does. The renewal code skipped a step: it didn't first stop the thread that pushes audio to the robot. That thread kept pushing audio into the old, already-closed connection without any error, so the logs still said "played N ms", while the new connection never actually made a sound. After the renewal on the evening of 11-07 (Toronto time), the robot was mute for about 13 hours. When my family said in the morning that it wasn't talking, it was really two problems at once: slow recognition and no sound.
 
-The fix: stop the old audio thread before renewing, the same way it's already done when waking the robot up. After a restart my family tried it and could hear it answer again.
+The fix: stop the old audio thread before renewing, the same way it's already done when waking the robot up. After a restart I listened in and could hear it answer again.
+
+Full story (timeline, how it was found, technical details): [docs/incident-2026-11-08-robot-silent.md](docs/incident-2026-11-08-robot-silent.md)
 
 ---
 
