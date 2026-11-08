@@ -2512,6 +2512,9 @@ class Bridge:
                 last_check = time.time()
                 if self.connected and self.provider and not self._token_age_ok():
                     self.refresh_session()
+                    # The TX loop holds the old connection's sender: stop it, or the new connection
+                    # never publishes and every talk "plays" into the dead one (11-08: silent ~13 h).
+                    self._stop_audio_tx()
                     # reconnect Agora with the new tokens
                     try:
                         self.rtc.disconnect()
