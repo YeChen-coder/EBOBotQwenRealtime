@@ -47,7 +47,7 @@ The dashboard log kept repeating `No transcript within 8s; ignoring turn`, meani
 ### 原因 / Cause
 
 ```mermaid
-flowchart LR
+flowchart TB
     A["Robot mic<br/>(home in China)"] -->|Agora| B["Program<br/>(Toronto)"]
     B -->|"PCM audio<br/>needs ~43 KB/s"| C{{"Cross-border link<br/>only ~35 KB/s<br/>at China evening peak"}}
     C --> D["Aliyun Beijing<br/>speech recognition"]
