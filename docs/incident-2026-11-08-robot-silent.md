@@ -110,12 +110,15 @@ After Round 1 was fixed, Mom's words were recognized again and the robot's text 
 ```mermaid
 flowchart TB
     subgraph BEFORE["Before renewal: works"]
-        T1["Audio thread"] -->|replies| S1["Sender A"] --> C1["Connection A"] --> R1["Robot speaker 🔊"]
+        direction LR
+        T1["Audio thread"] -->|replies| S1["Sender A"] --> C1["Connection A"] --> R1["Robot speaker<br/>(sound)"]
     end
     subgraph AFTER["After renewal at 11-07 21:59: silent"]
+        direction LR
         T2["Audio thread<br/>(still holds Sender A)"] -->|replies| S2["Sender A"] --> X["Connection A<br/>closed ✗"]
-        C2["Connection B<br/>(new)"] -.->|"nothing published"| R2["Robot speaker 🔇"]
+        C2["Connection B<br/>(new)"] -.->|"nothing published"| R2["Robot speaker<br/>(silent)"]
     end
+    BEFORE ~~~ AFTER
 ```
 
 <sub>备注：日志里的 "N ms played" 只是"交给 Sender A 了多少"。往已经断开的连接里交声音不会报错，所以日志照样显示播放成功。<br>Note: "N ms played" in the logs only counts how much was handed to Sender A. Handing audio to a closed connection raises no error, so the log still showed a successful playback.</sub>
