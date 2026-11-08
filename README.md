@@ -193,7 +193,7 @@ Okay, here it is step by step, with the model or tool used at each step.
 2. **Send the audio to the conversation model**: cloud **`qwen3.8-omni-flash-realtime`**.
 3. **Get the text of this sentence**: transcribed by cloud **`qwen3-asr-flash-realtime`**; if it's not back in 3 seconds, local **Whisper small** listens again.
 4. **No content** → don't answer.
-5. **"Shut up" type** (confirmed by **`qwen-plus`**) → don't answer, end the conversation, enter quiet mode.
+5. **"Shut up" type** (confirmed by **`qwen-plus`**) → don't answer, end the conversation, enter quiet mode. Same when the model itself promises to stay quiet ("I'll just sit here quietly"; local keywords, confirmed by **`qwen-plus`**): the session ends once that sentence finishes and quiet mode starts, instead of staying open until the idle timeout.
 6. **Not talking to it** (judged by **`qwen-plus`**, e.g. TV audio) → don't answer.
 7. **"Go charge" type** (confirmed by **`qwen-plus`**) → return to the dock, no following for 18 minutes, and answer as usual. If it says "I'm heading back now" by itself, a local rule makes it actually go back too.
 8. **Normal answer**: **`qwen3.8-omni-flash-realtime`** answers directly in voice, using the **Long'an Lingxin (`longanlingxin`)** voice, with web search when needed.

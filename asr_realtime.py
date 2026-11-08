@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 import logging
+import queue
 import threading
 import time
 from collections import deque
@@ -20,6 +21,9 @@ LOG = logging.getLogger('qwen-asr')
 
 AUDIO_CHUNK_BYTES = 32000  # 1 秒 16 kHz s16le
 RETRY_SECONDS = 30
+# 发不出去积压这么多条（100 ms 一块，约 5 秒）就当连接坏了。发送放在单独的线程：
+# 实测（11-05~07）去北京的网络一卡，ws.send 卡在主循环上 1~3 分钟，机器人整段失聪，连超时都不触发
+SEND_BACKLOG = 50
 
 
 class RealtimeTranscriber:
@@ -30,7 +34,7 @@ class RealtimeTranscriber:
         self.loop: asyncio.AbstractEventLoop | None = None
         self.ws: websocket.WebSocketApp | None = None
         self._thread: threading.Thread | None = None
-        self._send_lock = threading.Lock()
+        self._outbox: queue.Queue[str | None] = queue.Queue(maxsize=SEND_BACKLOG)
         self.ready: asyncio.Event | None = None
         self.gone: asyncio.Event | None = None
         self.closed = True
@@ -65,17 +69,36 @@ class RealtimeTranscriber:
             task.cancel()
         if not self.ready.is_set():
             if self.ws is not None:
-                self.ws.close()  # 没连上（或会话已结束）的连接别留在后台
+                # 没连上（或会话已结束）的连接别留在后台；可能卡在网络上，不能在主循环里关
+                threading.Thread(target=self.ws.close, name='qwen-asr-close', daemon=True).start()
             raise ConnectionError('ASR session not ready')
         LOG.info('ASR session ready (%s)', self.ws_url.rsplit('model=', 1)[-1])
 
-    def _on_open(self, _ws):
-        self._send({'type': 'session.update', 'session': {
+    def _on_open(self, ws):
+        ws.send(json.dumps({'type': 'session.update', 'session': {
             'input_audio_format': 'pcm',
             'sample_rate': 16000,
             'input_audio_transcription': {'language': self.language},
             'turn_detection': None,  # 手动模式：轮次由本地 VAD 决定
-        }})
+        }}, ensure_ascii=False))
+        # 每条连接一个发送线程和队列：旧连接卡死时线程留在原地，不耽误重连后的新连接
+        self._outbox = queue.Queue(maxsize=SEND_BACKLOG)
+        threading.Thread(target=self._send_loop, args=(ws, self._outbox), name='qwen-asr-send', daemon=True).start()
+
+    def _send_loop(self, ws, outbox: queue.Queue):
+        while True:
+            message = outbox.get()
+            if message is None:
+                return
+            try:
+                ws.send(message)
+            except Exception as exc:
+                self.loop.call_soon_threadsafe(self._send_failed, ws, str(exc))
+                return
+
+    def _send_failed(self, ws, reason: str):
+        if ws is self.ws:
+            self._lost(f'send failed: {reason}')
 
     def _handle(self, ws, message: str):
         if ws is not self.ws:
@@ -104,8 +127,9 @@ class RealtimeTranscriber:
 
     def _lost(self, reason: str):
         """连接断了：还在等结果的轮次立刻改用本地 Whisper（不必等超时），后台重连，下一轮起照常"""
-        if not self.closed:
-            LOG.warning('ASR connection lost (%s)', reason)
+        if self.closed:
+            return
+        LOG.warning('ASR connection lost (%s)', reason)
         self.closed = True
         if self.gone:
             self.gone.set()
@@ -113,6 +137,10 @@ class RealtimeTranscriber:
             self._resolve(future, None)
         self._awaiting_commit.clear()
         self._by_item.clear()
+        ws = self.ws
+        if ws is not None:
+            # 可能卡在网络上，不能在主循环里关
+            threading.Thread(target=ws.close, name='qwen-asr-close', daemon=True).start()
         self.reconnect_later()
 
     def reconnect_later(self):
@@ -139,14 +167,11 @@ class RealtimeTranscriber:
             future.set_result(text)
 
     def _send(self, message: dict):
-        ws = self.ws
+        """在主循环上调用，只排队，绝不碰网络。"""
         try:
-            with self._send_lock:
-                ws.send(json.dumps(message, ensure_ascii=False))
-        except Exception as exc:
-            if ws is self.ws and not self.closed:
-                self.closed = True  # 立刻停发，免得每块音频都报一次错
-                self.loop.call_soon_threadsafe(self._lost, f'send failed: {exc}')
+            self._outbox.put_nowait(json.dumps(message, ensure_ascii=False))
+        except queue.Full:
+            self._lost('send backlog full')
 
     def send_audio(self, pcm16k: bytes):
         if not self.available:
@@ -167,13 +192,17 @@ class RealtimeTranscriber:
 
     async def close(self):
         self.stopped = True
-        if self.ws is None:
+        ws, self.ws = self.ws, None
+        if ws is None:
             return
         if self.available:
             self._send({'type': 'session.finish'})
         self.closed = True
-        self.ws.close()
-        self.ws = None
+        try:
+            self._outbox.put_nowait(None)
+        except queue.Full:
+            pass
+        threading.Thread(target=ws.close, name='qwen-asr-close', daemon=True).start()
         if self._thread:
             await asyncio.to_thread(self._thread.join, 5)
             self._thread = None

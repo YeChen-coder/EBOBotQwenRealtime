@@ -397,18 +397,21 @@ class QwenRealtimeClient:
 
         try:
             json_str = json.dumps(message, ensure_ascii=False, separators=(',', ':'))
-            # 同步发送 + 锁：线程池并发 send 可能打乱 item.create 与音频的顺序
-            with self._send_lock:
-                self.ws.send(json_str)
+            # 在线程里发：网络卡住时不能拖住主循环（见 asr_realtime.py）。调用方都是逐条 await，顺序不会乱
+            await asyncio.to_thread(self._send_now, json_str)
         except Exception as exc:
             LOG.error('Failed to send message: %s', exc)
+
+    def _send_now(self, json_str: str):
+        with self._send_lock:
+            self.ws.send(json_str)
 
     async def close(self):
         """关闭连接"""
         self.stopped = True
-        if self.ws:
-            self.ws.close()
-            self.ws = None
+        ws, self.ws = self.ws, None
+        if ws:
+            threading.Thread(target=ws.close, name='qwen-ws-close', daemon=True).start()
         if self._thread:
             await asyncio.to_thread(self._thread.join, 5)
             self._thread = None

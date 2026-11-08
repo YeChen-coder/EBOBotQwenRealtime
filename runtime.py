@@ -79,6 +79,12 @@ class Supervisor:
         with self.lock:
             if self.active:
                 self.active.request_abort()
+                # 说到一半被叫停（看板按钮）：不收尾的话音频流一直开着，麦克风也一直静音，之后叫它也听不见
+                self.speaker.abort_stream()
+
+    def handle_quiet_promised(self):
+        """模型自己答应了安静：同样进入安静模式；对话由 Conversation 等这句说完再结束。"""
+        self.wake.quiet(self.config.quiet_seconds)
 
     def dock_and_rest(self) -> dict:
         """看板按钮：不在座上充电就回座；不论在不在，都开始冷却（调试频繁重启时防止它又跑出来）。"""
@@ -143,6 +149,9 @@ class Supervisor:
             f'语气口语、温暖、自然，每次两三句，不要长篇大论，不要提摄像头、人脸识别或“检测到”。'
         )
         with self.lock:
+            if self.active is not None and self.active.note_homecoming(name):
+                LOG.info('Homecoming greeting for %s will join the current conversation', name)
+                return True
             if not self.voice_eligible():
                 LOG.info('Skipped homecoming greeting for %s: busy or paused', name)
                 return False
@@ -263,6 +272,7 @@ class Supervisor:
             conversation.wake_words = self.wake.wake_words
             conversation.on_dock_request = self.handle_dock_request
             conversation.on_quiet_request = self.handle_quiet_request
+            conversation.on_quiet_promised = self.handle_quiet_promised
             conversation.local_transcribe = self.wake.transcriber.transcribe
             if self.memory is not None:
                 conversation.memory_context = self.memory.context()

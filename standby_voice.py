@@ -28,6 +28,8 @@ STOCK_PHRASES = {'谢谢', '谢谢谢谢', '谢谢你', '谢谢大家', '谢谢�
 
 RECENT_CONTEXT_SECONDS = 60
 REPEATED = re.compile(r'(.{1,10}?)\1{2,}')
+# 同一短语连着 5 遍以上（中间可隔标点；“谢谢谢谢”是正常说话）。不从数字起头：“2000000”不是复读
+LOOPED = re.compile(r'((?!\d).{1,10}?)(?:[，,。、？！?!\s]*\1){4,}')
 
 FILLER_WORDS = {'嗯嗯', '啊啊', '哦哦', '呃呃', '喵喵', '哈哈', '呵呵'}
 # 只有语气词（“嗯。”“嗯嗯嗯”“啊”“呃……”）：多半是履带声或别的噪音被识别出来的，一律当没听到
@@ -62,6 +64,11 @@ def actionable_transcript(transcript: str) -> bool:
 
 def compact_text(text: str) -> str:
     return ''.join(re.findall(r'[\w一-鿿]', text or '')).lower()
+
+
+def collapse_repeats(text: str) -> str:
+    """语音识别复读（实测“你就可以”连着一百多遍）只留一遍：这些话不是人说的，别进看板、判断器和对话模型。"""
+    return LOOPED.sub(r'\1', text)
 
 
 def valid_reply_text(text: str) -> bool:
@@ -124,6 +131,8 @@ class SpeechSegmenter:
             self.silence = 0 if voiced else self.silence + 1
             # 超长语句（>30 s）不在中途回答：丢弃，静音后重新监听
             if len(self.chunks) >= 1500:
+                if not self.too_long:
+                    LOG.info('standby dropped a segment over 30 s without a pause')
                 self.too_long = True
             if self.silence >= self.silence_frames:
                 if self.voiced >= 15 and not self.too_long:
