@@ -4,6 +4,7 @@
 是才把这一轮音频送进对话模型并回复，否则丢掉。以前是先 commit 进对话再判断，
 电视声、音乐、噪声全留在上下文里：实测妈妈问“今天多少？”，模型答“我听着像是《小幸运》”。
 实测：commit 后 0.5~1.4 秒出结果，比对话模型自带的转写（中位数 1.6 秒）快。
+音频编码成 Ogg Opus 再送（见 ogg_opus.py）：跨境上传晚高峰只剩约 35 KB/s，PCM 送不动。
 """
 from __future__ import annotations
 import asyncio
@@ -17,9 +18,10 @@ from collections import deque
 
 import websocket
 
+from ogg_opus import OggOpusStream
+
 LOG = logging.getLogger('qwen-asr')
 
-AUDIO_CHUNK_BYTES = 32000  # 1 秒 16 kHz s16le
 RETRY_SECONDS = 30
 # 发不出去积压这么多条（100 ms 一块，约 5 秒）就当连接坏了。发送放在单独的线程：
 # 实测（11-05~07）去北京的网络一卡，ws.send 卡在主循环上 1~3 分钟，机器人整段失聪，连超时都不触发
@@ -43,6 +45,7 @@ class RealtimeTranscriber:
         # commit 之后先等 committed 拿到 item_id，再按 item_id 对上识别结果
         self._awaiting_commit: deque[asyncio.Future] = deque()
         self._by_item: dict[str, asyncio.Future] = {}
+        self._ogg: OggOpusStream | None = None   # 每条连接一个 Ogg 流，第一次送音频时建
 
     @property
     def available(self) -> bool:
@@ -52,6 +55,7 @@ class RealtimeTranscriber:
         self.loop = asyncio.get_running_loop()
         self.ready, self.gone = asyncio.Event(), asyncio.Event()
         self.closed = False
+        self._ogg = None
         self.ws = websocket.WebSocketApp(
             self.ws_url,
             header=[f'Authorization: Bearer {self.api_key}'],
@@ -76,7 +80,7 @@ class RealtimeTranscriber:
 
     def _on_open(self, ws):
         ws.send(json.dumps({'type': 'session.update', 'session': {
-            'input_audio_format': 'pcm',
+            'input_audio_format': 'opus',
             'sample_rate': 16000,
             'input_audio_transcription': {'language': self.language},
             'turn_detection': None,  # 手动模式：轮次由本地 VAD 决定
@@ -119,7 +123,11 @@ class RealtimeTranscriber:
             LOG.warning('ASR failed: %s', event.get('error'))
             self._resolve(self._by_item.pop(event.get('item_id', ''), None), '')
         elif kind == 'error':
-            LOG.warning('ASR error: %s', event.get('error'))
+            error = event.get('error') or {}
+            LOG.warning('ASR error: %s', error)
+            # 提交失败时不会有 committed：不把它移出队列，后面每一轮的结果都会错位对到上一轮
+            if 'commit' in str(error.get('message', '')).lower() and self._awaiting_commit:
+                self._resolve(self._awaiting_commit.popleft(), None)
 
     def _handle_closed(self, ws, code, msg):
         if ws is self.ws:
@@ -176,9 +184,13 @@ class RealtimeTranscriber:
     def send_audio(self, pcm16k: bytes):
         if not self.available:
             return
-        for offset in range(0, len(pcm16k), AUDIO_CHUNK_BYTES):
-            self._send({'type': 'input_audio_buffer.append',
-                        'audio': base64.b64encode(pcm16k[offset:offset + AUDIO_CHUNK_BYTES]).decode('ascii')})
+        if self._ogg is None:
+            self._ogg = OggOpusStream()
+        self._append(self._ogg.feed(pcm16k))
+
+    def _append(self, ogg: bytes):
+        if ogg:
+            self._send({'type': 'input_audio_buffer.append', 'audio': base64.b64encode(ogg).decode('ascii')})
 
     def commit(self) -> asyncio.Future:
         """提交这一轮；返回的 future 得到识别文字，连接不可用时得到 None（调用方改用本地 Whisper）。"""
@@ -187,6 +199,8 @@ class RealtimeTranscriber:
             future.set_result(None)
             return future
         self._awaiting_commit.append(future)
+        if self._ogg is not None:
+            self._append(self._ogg.flush())
         self._send({'type': 'input_audio_buffer.commit'})
         return future
 
