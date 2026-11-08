@@ -464,3 +464,23 @@ What I found:
 - Why there are two copies of the YOLO model: Frigate only looks at the parts of the picture that move, and it has to see a person several times in a row before it counts, so someone lying still on the sofa often gets missed. So when the robot turns around looking for someone, the assistant takes its own snapshot at each stop and looks again carefully with the same YOLO. Same eyes, two ways of using them, so this copy stays.
 
 Next: rent a pay-by-the-hour machine for two or three days, run the whole thing on it for one night limited to 2 cores / 4 GB, and buy 2 cores / 4 GB if it holds up. The detailed plan is in docs/china-cloud-plan.md.
+
+---
+
+Today I went through some of the servers offered by cloud providers in China, and they really are pretty expensive. The program's minimum requirement is 2 cores / 4 GB, and honestly 2 cores / 4 GB is really tight. A 2-core / 4 GB machine costs about 150–200 yuan a year, and that's already a promotional price, already a very good deal. If you buy it properly, the real price should be around 500 yuan a year. This program is actually pretty heavy, really pretty heavy: it's demanding on CPU, and it definitely needs a dedicated CPU. So 4 cores / 8 GB is really the most reasonable, most suitable setup for it. I don't want the program to wobble every day because of some silly problem like the server's CPU or memory mysteriously maxing out. If maintenance means wearing myself out every day because the hardware can't keep up, that's not worth anything. So then, what does 4 cores / 8 GB look like right now? I had muse go through the big and small, old and new cloud providers in China, and the price is basically 500–1000 a year. Personally I feel that's close to 1000 a year, because 500 is really rare: the only one at 500 is Huawei's HECS 4-core / 8 GB. And it isn't even really 500, since bandwidth is charged separately, and I haven't added bandwidth in yet. Anyway, for 4 cores / 8 GB, basically every provider, mainstream or not, wants eight or nine hundred for a year, 900 to just over 1000. That's a really bad deal; I'd be better off buying a small PC myself. But if I buy a small PC and keep it at the family home in China, the problem is that I'm not there, and with tech-heavy problems like this it's hard to manage when I'm not there. So, all things considered, let's really put off the question of moving the deployment. I've asked muse to keep watching this for me. If a really, really good deal comes up, I might start thinking about it again. But if it stays like this, this cost-ineffective, then honestly I can live with the program as it is now.
+
+---
+
+Local Whisper as of 11-08
+Current model: **Whisper small** (faster-whisper, CPU, int8).
+
+It launched with base on 10-17 and switched to small on 10-19, because small is better at Chinese. Measured back then: base took about 0.75 s per sentence, small about 2.6 s.
+
+Measured from the logs: when small actually produces text, it usually takes 1.0–1.3 s; the slowest 10% take over 2.2 s.
+
+How many times it ran (10-17 to 11-08, 23 days):
+
+| Where it's used | Runs | Produced text | Notes |
+|---|---|---|---|
+| Listening for wake-up in standby | 62,698 (about 2,700 a day) | 1,039 (about 1.7%) | Outside a conversation, every stretch of sound goes through Whisper |
+| Backup during a conversation | 2,664 (38% of 7,076 turns) | 271 (184 of them led to a reply) | Only used when Aliyun hasn't returned text within 3 s |
