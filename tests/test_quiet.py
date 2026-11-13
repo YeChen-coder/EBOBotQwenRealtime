@@ -11,6 +11,7 @@ sys.modules['qwen_realtime'].QwenRealtimeClient = sys.modules['qwen_realtime'].Q
 sys.modules['ebo_transport'].Speaker = sys.modules['ebo_transport'].TranscriptStore = object
 sys.modules['ebo_transport'].AssistantOutputStore = object
 sys.modules['standby_voice'].has_wake_word = lambda *a: False
+sys.modules['standby_voice'].loose_wake_word = lambda *a: False
 sys.modules['standby_voice'].valid_reply_text = lambda t: bool(t)
 sys.modules['standby_voice'].collapse_repeats = lambda t: t
 sys.modules['state'].RuntimeState = object
@@ -76,6 +77,24 @@ async def promise_ends_the_session():
     assert c.stop.is_set(), '这句回复完就结束会话'
 
 
+async def going_to_dock_ends_the_session():
+    """11-12 实测：它回了充电座，会话还开着，连说四遍“我去充电座待着啦”"""
+    c = conversation(True)
+    docked = []
+    c.on_dock_request = lambda: docked.append(1)
+    c._handle_transcript_done('i', '既然你也觉得对，那就赶紧去拿瓶水喝吧。身体要紧，我去充电座待着啦。')
+    await settled()
+    await asyncio.sleep(.05)
+    assert docked == [1] and c.close_requested.is_set() and c.quiet == 0, '回充、结束会话，但不进安静模式'
+    c._handle_response_done({})
+    assert c.stop.is_set()
+    c = conversation(True)
+    c.on_dock_request = lambda: None
+    c._handle_transcript_done('i', '要我回去充电吗？')
+    await settled()
+    assert not c.close_requested.is_set(), '问句不算'
+
+
 async def asked_to_wait_is_not_asked_to_be_quiet():
     c = conversation(True)
     c.heard.append((0, '等我把桌子放到位了。'))
@@ -139,7 +158,7 @@ async def abort_while_connecting_never_speaks():
     assert c.opening == ['cleanup'], c.opening
 
 
-for test in (promise_ends_the_session, asked_to_wait_is_not_asked_to_be_quiet, promise_after_the_reply_finished, hypothetical_keeps_chatting,
+for test in (promise_ends_the_session, going_to_dock_ends_the_session, asked_to_wait_is_not_asked_to_be_quiet, promise_after_the_reply_finished, hypothetical_keeps_chatting,
              judge_failure_keeps_chatting, plain_reply_costs_no_check, session_already_over,
              abort_while_connecting_never_speaks):
     asyncio.run(test())

@@ -33,6 +33,12 @@ CONFUSABLE = {
     '妈妈': ('妈呀', '大妈', '马马', '码码'),
 }
 
+# “小人”是常用词：电视对白里一长句带个“小人”就唤醒了（11-12 实测“好奇的小人真假……女儿放了去女儿放了”
+# 直接开了会话，跟电视聊了 20 分钟）。回放 144 次唤醒，只靠它唤醒的 8 次里真在叫它的 6 次都 ≤13 个字，
+# 电视/背景的两次 59、71 个字。所以长句里只有它时，还要判断器确认是在跟机器人说
+LOOSE_WAKE_WORDS = ('小人儿',)
+LOOSE_MAX_CHARS = 20
+
 _INITIALS = (('zh', 'z'), ('ch', 'c'), ('sh', 's'))
 
 
@@ -95,3 +101,12 @@ def matches(text: str, wake_words: tuple[str, ...]) -> bool:
             if max(dists) <= 1 and sum(dists) <= 1 and chars[start:start + k] not in CONFUSABLE.get(word, ()):
                 return True
     return False
+
+
+def needs_confirmation(text: str, wake_words: tuple[str, ...]) -> bool:
+    """唤醒词只靠“小人儿/小人”命中、又是一长句：不能直接算叫它，要再问判断器（见 LOOSE_WAKE_WORDS）。"""
+    loose = tuple(w for w in wake_words if w in LOOSE_WAKE_WORDS)
+    if not loose or len(_hanzi(text)) <= LOOSE_MAX_CHARS:
+        return False
+    strict = tuple(w for w in wake_words if w not in LOOSE_WAKE_WORDS)
+    return matches(text, loose) and not (strict and matches(text, strict))

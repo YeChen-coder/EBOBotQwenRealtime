@@ -494,3 +494,22 @@ How many times it ran (10-17 to 11-08, 23 days):
 |---|---|---|---|
 | Listening for wake-up in standby | 62,698 (about 2,700 a day) | 1,039 (about 1.7%) | Outside a conversation, every stretch of sound goes through Whisper |
 | Backup during a conversation | 2,664 (38% of 7,076 turns) | 271 (184 of them led to a reply) | Only used when Aliyun hasn't returned text within 3 s |
+
+---
+
+With the TV on in the evening, the robot chatted along with the TV (11-12)
+Problem: the family said the robot had been talking nonsense the last couple of days. In the conversation records, the nonsense was all in two stretches on the evening of 11-12 (home time 20:25–20:40 and 21:22–21:42). Nobody had called it: TV dialogue and a phone call woke it up, and then it chatted along with the TV for 15–20 minutes ("弱鸡症确实让人心里没底", "高材生直接给牌子，这操作挺干脆的"). The other conversations (welcome-home greetings, Sun Yingsha news, the morning weather) were fine.
+
+Four causes:
+1. The wake word "小人儿" is too easy for the TV to hit. Speech recognition almost always writes "小人儿" as "小人", so "小人" counts too; one TV line, "好奇的小人真假……", woke it up directly, and a wake word skips the judge.
+2. With the TV on, the judge stops the long TV lines but lets through the "对", "嗯，行", "你疯了" in between: it can't tell whether that's mom answering the robot or someone on TV, so the robot answered each one. Anything said within 20 s of the robot speaking also counts as a reply to it, up to 3 times in a row without the judge, which let the first few TV lines straight in.
+3. It said "我去充电座待着啦" itself and really did go back, but the conversation didn't end. Back on the dock it kept answering "对" from the background and said the same line four times.
+4. It was told the time only once, when the conversation started: 6 minutes later it still said "九点二十二", and when someone said "六点十五" it agreed (it was actually after eight).
+
+Fix (all four):
+1. In a long sentence (over 20 characters) where the only match is "小人" and there's no other wake word, it doesn't count as calling the robot; the judge has to agree first. Replayed all 144 wake-ups: of the 8 that came only from "小人", the 6 real calls were all 13 characters or fewer and still wake it; the two TV/background wake-ups were 59 and 71 characters and now go to the judge.
+2. Added a "background mode": when 4 turns in a row are judged "not talking to the robot", the TV is probably on or someone is on the phone. Then it no longer treats the next line as a reply by default, doesn't answer short replies of 3 characters or fewer (对 / 对呀 / 嗯行), and quietly ends the conversation if nothing is let through for 90 s. A wake word, or the judge letting a real sentence through, ends background mode. Replaying the old logs, 25 of 197 conversations would have entered it. Spot-checking the replies it would have cut, nearly all were answers to the TV or a phone call; in mom's own conversations it only ignored lines the judge was already stopping, or ended the conversation after she said "回去吧" / "回家乖乖充电吧".
+3. When the robot says it's going to charge / back to the dock, besides docking, the conversation now ends after that sentence (without the 18-minute quiet mode).
+4. Every time the family's words are sent to the model, the current home time goes in front; it answers "what time is it" from that and doesn't announce the time unprompted.
+
+Live since the evening of 11-12 (restarted while the robot was in standby). Needs a few evenings of real conversations to check, especially whether background mode swallows anything mom really says to it.

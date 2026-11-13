@@ -92,6 +92,11 @@ def has_wake_word(text: str, wake_words: tuple[str, ...]) -> bool:
     return bool(wake_words) and wake_match.matches(text, wake_words)
 
 
+def loose_wake_word(text: str, wake_words: tuple[str, ...]) -> bool:
+    """只靠“小人”命中的长句：唤醒词不作数，交给判断器（见 wake_match.LOOSE_WAKE_WORDS）"""
+    return bool(wake_words) and wake_match.needs_confirmation(text, wake_words)
+
+
 class SpeechSegmenter:
     """24 kHz PCM -> 完整语句；静音与短噪声被丢弃。"""
 
@@ -284,6 +289,9 @@ class StandbyVoice:
         if not valid_wake_text(text):
             return False
         wake_word = bool(self.wake_words) and has_wake_word(text, self.wake_words)
+        if wake_word and loose_wake_word(text, self.wake_words):
+            LOG.info('standby: "小人" inside a long sentence; asking the judge instead: %r', text[:60])
+            wake_word = False
         if not wake_word and compact_text(text) in STOCK_PHRASES:
             LOG.info('standby ignored a stock phrase Whisper makes up on noise: %r', text)
             return False

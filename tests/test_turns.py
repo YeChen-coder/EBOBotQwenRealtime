@@ -125,6 +125,7 @@ async def free_replies():
     c.stop, c.addressee = asyncio.Event(), Addressee()
     c.wake_words, c.heard, c.last_assistant_text = ('猫猫',), [], ''
     c.skip_addressee_once, c.free_replies = False, 0
+    c.ignored_streak, c.background_since = 0, None
     c.on_quiet_request = c.on_dock_request = None
     c.response_active, c.qwen = False, object()
     c.state = type('S', (), {'increment': lambda self, name: None})()
@@ -148,6 +149,77 @@ async def free_replies():
     assert answered[-1] is True and c.free_replies == 1
 
 asyncio.run(free_replies())
+
+
+class Judge:
+    """按句子回答：在表里的放行，其余判不是"""
+    def __init__(self, yes=()):
+        self.yes, self.asked = set(yes), []
+
+    def is_addressed(self, text, last, recent):
+        self.asked.append(text)
+        return text in self.yes
+
+
+async def background_mode():
+    """11-12 实测：电视开着，判断器拦住长对白，却放行“对”“嗯，行”，猫猫一句句接"""
+    c = Conversation.__new__(Conversation)
+    c.stop, c.addressee = asyncio.Event(), Judge(yes=('对', '嗯，行', '妈妈你今天吃啥了呀'))
+    c.wake_words, c.heard, c.last_assistant_text = ('猫猫', '小人儿'), [], ''
+    c.skip_addressee_once, c.free_replies = False, 0
+    c.ignored_streak, c.background_since = 0, None
+    c.on_quiet_request = c.on_dock_request = None
+    c.response_active, c.qwen = False, object()
+    c.state = type('S', (), {'increment': lambda self, name: None})()
+    c._record_user_text = lambda text: None
+    answered = []
+
+    async def settle(pcm, respond, text=''):
+        answered.append(respond)
+    c._settle_turn = settle
+
+    async def said(text, is_reply=False):
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(text)
+        await c._respond_if_speech(b'', future, is_reply)
+        return answered[-1] if answered else None
+    assert await said('对') is True and c.background_since is None      # 平时短应答照常放行
+    for line in ('月月，我要去她住去', '这床单被套都是我的', '三张卡给你', '你三十八了'):
+        assert await said(line) is False
+    assert c.background_since is not None, '连续 4 句不是在说它：背景模式'
+    asked = len(c.addressee.asked)
+    assert await said('嗯，行', is_reply=True) is False and len(c.addressee.asked) == asked, '短应答直接不回，也不问判断器、不免判断'
+    assert await said('妈妈你今天吃啥了呀', is_reply=True) is True and c.addressee.asked[-1] == '妈妈你今天吃啥了呀', \
+        '背景模式里不免判断'
+    assert c.background_since is None, '放行一句正经话就恢复'
+    for line in ('你看清楚你怀孕了', '电脑屏幕太大了', '我是东山的人海风', '都是张总的东西'):
+        await said(line)
+    assert c.background_since is not None
+    assert await said('猫猫你在吗') is True and c.background_since is None, '唤醒词恢复'
+    # 长句里只有“小人”不算唤醒词，照常判断；短的“小人你在吗”还是唤醒词
+    long_tv = '虽然是个这但那晚的女人是好奇的小人真假把后外放了去女儿放了去女儿放了'
+    assert await said(long_tv) is False and c.addressee.asked[-1] == long_tv
+    asked = len(c.addressee.asked)
+    assert await said('小人你在吗') is True and len(c.addressee.asked) == asked
+
+asyncio.run(background_mode())
+
+
+async def background_closes_quietly():
+    c = Conversation.__new__(Conversation)
+    c.config = types.SimpleNamespace(session_max_seconds=2700, session_idle_seconds=300)
+    c.stop, c.response_active, c.uncommitted_audio = asyncio.Event(), False, False
+    c.speaker = types.SimpleNamespace(input_muted=lambda: False)
+    c.session_started_at = time.time()
+    c.last_activity = time.monotonic() - 100
+    c.background_since = None
+    await c._check_timeouts()
+    assert not c.stop.is_set(), '不在背景模式：按平常的空闲超时'
+    c.background_since = time.monotonic() - 100
+    await c._check_timeouts()
+    assert c.stop.is_set(), '背景模式 90 秒没放行一句：结束'
+
+asyncio.run(background_closes_quietly())
 
 
 class StuckSocket:
@@ -218,6 +290,7 @@ async def homecoming_joins_the_conversation():
     c = Conversation.__new__(Conversation)
     c.stop, c.close_requested = asyncio.Event(), asyncio.Event()
     c.state = types.SimpleNamespace(increment=lambda name: None)
+    c.config = types.SimpleNamespace(home_timezone='Asia/Shanghai')
     c.turn_ended_at, c.awaiting_transcript, c.homecoming_note = time.monotonic(), True, ''
     items = []
 
@@ -232,7 +305,7 @@ async def homecoming_joins_the_conversation():
     assert '妈妈刚回到家' in items[0] and items[0].endswith('你咋不问候我') and not c.homecoming_note
     items.clear()
     await c._settle_turn(b'', True, '第二句')
-    assert items[0] == '第二句', '只带一次'
+    assert re.fullmatch(r'\[家里现在 \d\d:\d\d\] 第二句', items[0]), ('只带一次，但每句都带时间', items[0])
     c.stop.set()
     assert not c.note_homecoming('妈妈'), '会话要结束了，交给调用方'
 

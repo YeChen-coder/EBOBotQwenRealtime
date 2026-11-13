@@ -12,6 +12,8 @@ import threading
 import time
 import uuid
 from collections import deque
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from asr_realtime import RealtimeTranscriber
 from audio_utils import EndOfTurnDetector, resample_24k_to_16k
@@ -19,7 +21,7 @@ from config import Config, Profile
 from qwen_realtime import QwenRealtimeClient, QwenConfig
 from ebo_transport import Speaker, TranscriptStore, AssistantOutputStore
 from addressee import may_be_dock_request, may_be_quiet_request, may_promise_quiet
-from standby_voice import collapse_repeats, has_wake_word, valid_reply_text
+from standby_voice import collapse_repeats, has_wake_word, loose_wake_word, valid_reply_text
 from state import RuntimeState
 
 # 等服务端转出这一轮说了什么；超时就照常回复，不能因为转录慢把真人的话吞掉
@@ -34,6 +36,12 @@ REPLY_WINDOW_SECONDS = 20
 # 上面这条免判断最多用几次，喊唤醒词才重新算。实测（11-05）它自己续自己：背景声一被回答，下一句又算接话，
 # 连聊 29 分钟到时长上限，85 次回复里 69 次没过判断器。超过后交给判断器，妈妈真在聊时它基本都放行
 MAX_FREE_REPLIES = 3
+# 背景模式：连续这么多句被判“不是在跟机器人说”，多半开着电视或在打电话。实测（11-12）判断器能拦住长的电视对白，
+# 却会放行夹在中间的“对”“嗯，行”“你疯了”，猫猫一句句接，家人听着就是在乱说。进入背景模式后：
+# 不再免判断接话、3 个字以内的短应答不回、90 秒没有一句放行就安静结束会话；喊唤醒词或放行一句正经话就恢复
+BACKGROUND_AFTER_IGNORED = 4
+BACKGROUND_SHORT_CHARS = 3
+BACKGROUND_CLOSE_SECONDS = 90
 LOOP_STALL_SECONDS = 3   # 主循环每秒醒一次，隔这么久才醒说明被什么堵住了，记下来
 # 对方只是让它等一下（实测“等我把桌子放到位了”），模型答应“安静等着”也不算要安静：进安静模式 18 分钟只认唤醒词，
 # 她放好桌子回来喊它就不理了。不结束会话，等她回来接着聊
@@ -53,7 +61,19 @@ def says_going_to_dock(reply: str) -> bool:
                for sentence in re.split(r'(?<=[。！？!?.])', reply))  # 服务端转录超过这个时间就改用本地 Whisper
 # 家人的话是以文字发给模型的（见 _settle_turn），来自语音识别
 ASR_TEXT_INSTRUCTION = ('\n家人说的话会以文字形式给你，是语音识别出来的，常有同音错别字（比如“小人儿”写成“小人”），'
-                        '请按读音和上下文理解，不要指出错字。')
+                        '请按读音和上下文理解，不要指出错字。'
+                        '每句话开头方括号里是说这句话时家里的时间（程序加的，不是家人说的），问到几点就按它答，'
+                        '别人说的时间和它对不上时以它为准；没人问就不要主动报时。')
+
+
+def time_note(tz_name: str) -> str:
+    """每句话带上家里的当前时间。实测（11-12）时间只在会话开头给一次：聊了 6 分钟还说“九点二十二”，
+    有人说“六点十五”它也跟着说对（其实已经八点多）"""
+    try:
+        now = datetime.now(ZoneInfo(tz_name)) if tz_name else datetime.now()
+    except Exception:
+        now = datetime.now()
+    return f'[家里现在 {now:%H:%M}] '
 DOCK_INSTRUCTION = ('\n你有自己的充电座。如果有人让你回去充电、回充电座或回去休息，你会自动回去，'
                     '只要简短答应一句（比如“好的，我去充电啦”），不要说自己做不到。')
 
@@ -117,6 +137,8 @@ class Conversation:
         self.wake_words: tuple[str, ...] = ()
         self.skip_addressee_once = False
         self.free_replies = 0
+        self.ignored_streak = 0             # 连续被判“不是在跟机器人说”的句数
+        self.background_since = None        # 进入背景模式的时刻（monotonic），None = 不在背景模式
         self.homecoming_note = ''           # 会话中才认出有人回家：下一句回复时带给模型（note_homecoming）
         self.local_busy = False            # 上一次本地 Whisper 还没跑完（卡住时不再叠一个）
         self.last_assistant_text = ''
@@ -301,6 +323,10 @@ class Conversation:
         if time.time() - self.session_started_at > self.config.session_max_seconds:
             LOG.info('Session exceeded max duration, closing')
             self.stop.set()
+        elif (self.background_since is not None and time.monotonic()
+              - max(self.background_since, self.last_activity) > BACKGROUND_CLOSE_SECONDS):
+            LOG.info('Only background talk for %ds; closing quietly', BACKGROUND_CLOSE_SECONDS)
+            self.stop.set()
         elif time.monotonic() - self.last_activity > min(self.config.session_idle_seconds, QWEN_IDLE_LIMIT - 30):
             LOG.info('Session idle for %.0fs, closing', min(self.config.session_idle_seconds, QWEN_IDLE_LIMIT - 30))
             self.stop.set()
@@ -432,7 +458,9 @@ class Conversation:
             if respond and self.qwen and not self.stop.is_set():
                 if text.strip():
                     note, self.homecoming_note = self.homecoming_note, ''
-                    await self.qwen.create_conversation_item(note + text.strip(), f'item_{uuid.uuid4().hex[:20]}')
+                    clock = time_note(getattr(self.config, 'home_timezone', ''))
+                    await self.qwen.create_conversation_item(clock + note + text.strip(),
+                                                             f'item_{uuid.uuid4().hex[:20]}')
                 else:
                     await self.qwen.send_audio(resample_24k_to_16k(turn_pcm))
                     await self.qwen.commit_audio_buffer()
@@ -462,9 +490,16 @@ class Conversation:
                 text = collapsed
             self._record_user_text(text)
             skip_check, self.skip_addressee_once = self.skip_addressee_once, False
-            if has_wake_word(text, self.wake_words):
+            wake_word = has_wake_word(text, self.wake_words) and not loose_wake_word(text, self.wake_words)
+            if wake_word:
                 self.free_replies = 0
-            if is_reply and not skip_check and self.free_replies < MAX_FREE_REPLIES:
+                self._leave_background('wake word')
+            background = self.background_since is not None
+            if background and not skip_check and len(re.findall(r'[一-鿿]', text)) <= BACKGROUND_SHORT_CHARS:
+                LOG.info('Background mode: ignored a short reply-like turn: %r', text)
+                self.state.increment('input_turns_ignored')
+                return
+            if is_reply and not skip_check and not background and self.free_replies < MAX_FREE_REPLIES:
                 self.free_replies += 1
                 LOG.info('Turn started within %ds of the robot speaking; treating it as a reply (%d/%d)',
                          REPLY_WINDOW_SECONDS, self.free_replies, MAX_FREE_REPLIES)
@@ -472,8 +507,7 @@ class Conversation:
             if not skip_check and TELLING_YOU.search(text):
                 LOG.info('Turn says it is telling the robot something; treating it as addressed')
                 skip_check = True
-            if (text and self.addressee is not None and not skip_check
-                    and not has_wake_word(text, self.wake_words)):
+            if text and self.addressee is not None and not skip_check and not wake_word:
                 # heard 的最后一条就是当前这句
                 recent = tuple(t for at, t in list(self.heard)[:-1] if at >= time.monotonic() - 60)
                 addressed = await asyncio.to_thread(self.addressee.is_addressed, text,
@@ -482,7 +516,15 @@ class Conversation:
                 if addressed is False:
                     LOG.info('Ignored turn not addressed to the robot: %r', text)
                     self.state.increment('input_turns_ignored')
+                    self.ignored_streak += 1
+                    if self.background_since is None and self.ignored_streak >= BACKGROUND_AFTER_IGNORED:
+                        LOG.info('%d turns in a row not addressed to the robot; background mode (TV or a call?)',
+                                 self.ignored_streak)
+                        self.background_since = time.monotonic()
                     return
+                if addressed is True:
+                    self._leave_background('the judge let a turn through')
+            self.ignored_streak = 0
             if text and self.addressee is not None and self.on_quiet_request and may_be_quiet_request(text):
                 if await asyncio.to_thread(self.addressee.wants_quiet, text):
                     # 不回答，直接结束对话；之后一段时间只认唤醒词
@@ -544,12 +586,17 @@ class Conversation:
             self.last_assistant_text = transcript[-200:]
             self.memory_lines.append(('assistant', transcript, time.time()))
             # 说到做到：模型答应了“我这就回去（充电）”，就真的回充（实测用户说“回去吧”时它答应了却没动）
-            if (self.on_dock_request and says_going_to_dock(transcript)
-                    and time.monotonic() - self.last_dock_request > 60):
+            # 说了回去就结束这场对话（这句播完就断）：实测（11-12）它回了充电座，会话却还开着，
+            # 背景里每个“对”都接一句，连说四遍“我去充电座待着啦”
+            going_to_dock = self.on_dock_request is not None and says_going_to_dock(transcript)
+            if going_to_dock and time.monotonic() - self.last_dock_request > 60:
                 LOG.info('Assistant said it is going to charge; docking: %r', transcript[:60])
                 self.last_dock_request = time.monotonic()
                 self.loop.run_in_executor(None, self.on_dock_request)
-            if self.addressee is not None and self.on_quiet_promised and may_promise_quiet(transcript):
+            if going_to_dock:
+                LOG.info('Assistant said it is going to charge; ending the session after this reply')
+                self._request_close()
+            elif self.addressee is not None and self.on_quiet_promised and may_promise_quiet(transcript):
                 asyncio.create_task(self._honor_quiet_promise(transcript))
         if transcript:
             self.outputs.append(
@@ -632,6 +679,12 @@ class Conversation:
             self.abort_requested.set()
             return
         self.loop.call_soon_threadsafe(self._request_close)
+
+    def _leave_background(self, why: str):
+        self.ignored_streak = 0
+        if self.background_since is not None:
+            LOG.info('Leaving background mode: %s', why)
+            self.background_since = None
 
     def _request_close(self):
         self.close_requested.set()
