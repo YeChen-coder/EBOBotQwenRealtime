@@ -513,3 +513,18 @@ Fix (all four):
 4. Every time the family's words are sent to the model, the current home time goes in front; it answers "what time is it" from that and doesn't announce the time unprompted.
 
 Live since the evening of 11-12 (restarted while the robot was in standby). Needs a few evenings of real conversations to check, especially whether background mode swallows anything mom really says to it.
+
+---
+
+Conversations woken without a name get their first lines judged too; voice wake-ups recognize mom (11-14)
+Problem: I went through a week of conversations (11-06 to 11-13) day by day. After the 11-12 change, TV lines were already being stopped on the evening of the 13th, but two kinds of odd replies were still in the week. One: nobody called the robot, a TV line or something said on a phone call woke it, and it kept chatting ("你好，我是平安保险的", "最实际的，就是最好的"). Two: it didn't know mom was the one talking. Mom said "你咋不问候我妈妈" and it answered "你赶紧去给妈妈倒杯温水"; someone said "爸爸" and it called itself "爸爸在呢"; mom came home and it said "小叶子也想你了".
+
+Causes:
+1. Without a wake word, standby asks the judge about the text from local Whisper, and that text often doesn't match what was said. Whisper wrote "好的" where the cloud recognizer heard the TV saying "那也太抠了"; "等一下" was really "不要关着我，你不要那样对我"; "知道了" was really "陈总，陈总". After waking, the first line wasn't judged, and the next lines within 20 s were let through without the judge up to 3 times, so the first few TV lines all got in.
+2. Every voice-woken conversation was treated as "family member" (unknown who). The model only sees text, so it took "妈妈" to mean a third person.
+
+Fix:
+1. In conversations the judge woke (no wake word), the first line is judged again on the cloud transcript. If it's judged not to be for the robot, there's no reply, but the conversation stays open and the next line is judged as usual. These conversations get only 1 "said within 20 s, so it's a reply" pass, back to 3 after a wake word. Conversations woken by a wake word are unchanged. Replaying such conversations since 10-28: of 39 judge-woken openings, 23 would be judged not for the robot on the cloud text, mostly TV, phone calls and talking to dad. A few may have been mom really calling it ("出来下来下来下来", "你咋不召唤了呢"); those now get no reply, and she can say it again or use its name.
+2. On a voice wake-up, if the camera recognized exactly one family member (mom or dad) in the last 15 minutes, the conversation starts as that person. If both were recognized, or neither, it's still "family member", but the prompt now says: the household is mom and dad with no children, someone talking about "妈妈" is most likely mom talking about herself, don't tell them to look after mom, and don't call yourself dad, mom or 小叶子.
+
+Live since early 11-15 (restarted while the robot was in standby). Needs a few days to check: whether mom gets ignored when she really talks to it (especially lines without its name), and how often the camera recognizes her. Not changed yet: it casually promises things it can't do ("我这就把水端过来"), and repeats its last line when the other person only says "对".

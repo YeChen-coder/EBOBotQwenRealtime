@@ -36,6 +36,10 @@ REPLY_WINDOW_SECONDS = 20
 # 上面这条免判断最多用几次，喊唤醒词才重新算。实测（11-05）它自己续自己：背景声一被回答，下一句又算接话，
 # 连聊 29 分钟到时长上限，85 次回复里 69 次没过判断器。超过后交给判断器，妈妈真在聊时它基本都放行
 MAX_FREE_REPLIES = 3
+# 没喊唤醒词、靠判断器叫醒的会话，免判断接话只给 1 次，喊了唤醒词再恢复成 3 次。
+# 回放（11-14）10-28 以来这类会话里 199 次免判断接话，判断器只认 99 次；没认的多是电视、电话（“高材生直接给他那个牌子”
+# “最实际的，最好的”“喂，你好，我是平安保险”），猫猫接着说就成了“乱说话”
+JUDGE_WOKEN_FREE_REPLIES = 1
 # 背景模式：连续这么多句被判“不是在跟机器人说”，多半开着电视或在打电话。实测（11-12）判断器能拦住长的电视对白，
 # 却会放行夹在中间的“对”“嗯，行”“你疯了”，猫猫一句句接，家人听着就是在乱说。进入背景模式后：
 # 不再免判断接话、3 个字以内的短应答不回、90 秒没有一句放行就安静结束会话；喊唤醒词或放行一句正经话就恢复
@@ -74,6 +78,11 @@ def time_note(tz_name: str) -> str:
     except Exception:
         now = datetime.now()
     return f'[家里现在 {now:%H:%M}] '
+# 不知道是谁在说话时（语音叫醒、摄像头没认出来）。实测（11-07、11-09、11-12）：妈妈说“你咋不问候我妈妈”，
+# 它回“你赶紧去给妈妈倒杯温水”；有人叫“爸爸”，它自称“爸爸在呢”；妈妈回家，它说“小叶子也想你了”
+GUEST_NOTE = ('\n（不知道具体是谁在说话。家里平时是妈妈和爸爸，没有小孩，姐姐小叶子不在家。'
+              '对方用“妈妈”说事（“妈妈回来了”“你咋不问候妈妈”“给妈妈倒水”）多半是妈妈在说她自己，'
+              '就按跟妈妈说话来回答，不要叫对方去照顾妈妈。你是猫猫，不要自称爸爸、妈妈或小叶子。）')
 DOCK_INSTRUCTION = ('\n你有自己的充电座。如果有人让你回去充电、回充电座或回去休息，你会自动回去，'
                     '只要简短答应一句（比如“好的，我去充电啦”），不要说自己做不到。')
 
@@ -82,6 +91,7 @@ LOG = logging.getLogger('conversation')
 
 class Conversation:
     """管理单次对话会话"""
+    max_free_replies = MAX_FREE_REPLIES   # 免判断接话的上限（靠判断器叫醒的会话会调低，见 _opening）
 
     def __init__(
         self,
@@ -137,7 +147,8 @@ class Conversation:
         self.wake_words: tuple[str, ...] = ()
         self.skip_addressee_once = False
         self.free_replies = 0
-        self.ignored_streak = 0             # 连续被判“不是在跟机器人说”的句数
+        self.max_free_replies = MAX_FREE_REPLIES
+        self.ignored_streak = 0            # 连续被判“不是在跟机器人说”的句数
         self.background_since = None        # 进入背景模式的时刻（monotonic），None = 不在背景模式
         self.homecoming_note = ''           # 会话中才认出有人回家：下一句回复时带给模型（note_homecoming）
         self.local_busy = False            # 上一次本地 Whisper 还没跑完（卡住时不再叠一个）
@@ -239,6 +250,8 @@ class Conversation:
     def _instructions(self) -> str:
         name = self.profile.display_name
         text = f'{self.config.instructions}\n当前和你说话的是：{name}。' if name else self.config.instructions
+        if self.profile.id == 'guest':
+            text += GUEST_NOTE
         if self.memory_context:
             text += f'\n\n{self.memory_context}\n'
         if self.night_context:
@@ -275,8 +288,15 @@ class Conversation:
             return
         if turn is None:
             return
-        # 唤醒句在待机时已经判断过是在对机器人说，第一轮不再重复判断
-        self.skip_addressee_once = True
+        if self.woken_by_wake_word(turn.text):
+            # 喊了唤醒词：第一轮不再判断
+            self.skip_addressee_once = True
+        else:
+            # 判断器在待机时用本地 Whisper 的字判过，但那些字常常和实际说的对不上：实测（11-08）Whisper 写“好的”，
+            # 云端识别是电视里的“那也太抠了”；“等一下”其实是“不要关着我，你不要那样对我”；“知道了”其实是“陈总，陈总”。
+            # 第一轮按云端识别的字再判一次；判成不是在跟它说就不回，会话还开着，再说一句照常判断
+            self.max_free_replies = JUDGE_WOKEN_FREE_REPLIES
+            LOG.info('Woken by the judge, not a wake word; judging the opening again on the cloud transcript')
         LOG.info('Opening with wake utterance: %s', turn.text)
         if turn.text:
             self.memory_lines.append(('user', turn.text, time.time()))
@@ -493,16 +513,17 @@ class Conversation:
             wake_word = has_wake_word(text, self.wake_words) and not loose_wake_word(text, self.wake_words)
             if wake_word:
                 self.free_replies = 0
+                self.max_free_replies = MAX_FREE_REPLIES
                 self._leave_background('wake word')
             background = self.background_since is not None
             if background and not skip_check and len(re.findall(r'[一-鿿]', text)) <= BACKGROUND_SHORT_CHARS:
                 LOG.info('Background mode: ignored a short reply-like turn: %r', text)
                 self.state.increment('input_turns_ignored')
                 return
-            if is_reply and not skip_check and not background and self.free_replies < MAX_FREE_REPLIES:
+            if is_reply and not skip_check and not background and self.free_replies < self.max_free_replies:
                 self.free_replies += 1
                 LOG.info('Turn started within %ds of the robot speaking; treating it as a reply (%d/%d)',
-                         REPLY_WINDOW_SECONDS, self.free_replies, MAX_FREE_REPLIES)
+                         REPLY_WINDOW_SECONDS, self.free_replies, self.max_free_replies)
                 skip_check = True
             if not skip_check and TELLING_YOU.search(text):
                 LOG.info('Turn says it is telling the robot something; treating it as addressed')
@@ -679,6 +700,9 @@ class Conversation:
             self.abort_requested.set()
             return
         self.loop.call_soon_threadsafe(self._request_close)
+
+    def woken_by_wake_word(self, text: str) -> bool:
+        return has_wake_word(text, self.wake_words) and not loose_wake_word(text, self.wake_words)
 
     def _leave_background(self, why: str):
         self.ignored_streak = 0

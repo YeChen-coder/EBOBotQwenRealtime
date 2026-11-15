@@ -33,6 +33,7 @@ from state import RuntimeState
 LOG = logging.getLogger('ebo-qwen-runtime')
 
 GUEST_PROFILE = Profile('guest', '', '家人')
+VOICE_FACE_WINDOW = 15 * 60   # 语音叫醒前这么久内摄像头认出的家人，就当是这位在说话
 
 
 class Supervisor:
@@ -231,11 +232,26 @@ class Supervisor:
                 and snapshot['audio_streaming'] and not self.speaker.input_muted())
 
     def accept_voice(self, turn: VoiceTurn) -> bool:
-        """唤醒句已验证 -> 以访客身份开启会话（当前版本没有人脸识别）"""
+        """唤醒句已验证 -> 开启会话。最近摄像头只认出一位家人就按这位家人，否则按“家人”（不知道是谁）"""
         with self.lock:
             if not self.voice_eligible():
                 return False
-            return self.start('guest', 'voice', turn)
+            return self.start(self.recent_speaker(), 'voice', turn)
+
+    def recent_speaker(self, now: float | None = None) -> str:
+        """语音叫醒时猜是谁在说：VOICE_FACE_WINDOW 秒内摄像头只认出一位家人，就是这位。
+        实测（11-07）一律当“家人”：妈妈说“你咋不问候我妈妈”，猫猫回“你赶紧去给妈妈倒杯温水”；
+        妈妈说“我就是妈妈”它才改口。两位都认出过、或谁都没认出，就还是“家人”"""
+        if self.greeter is None:
+            return 'guest'
+        now = time.time() if now is None else now
+        seen = [p for p in self.config.profiles
+                if now - self.greeter.seen.get(p.face_name, -1e18) <= VOICE_FACE_WINDOW]
+        if len(seen) != 1:
+            return 'guest'
+        LOG.info('Voice wake: camera recognized %s in the last %d min; talking as %s',
+                 seen[0].face_name, VOICE_FACE_WINDOW // 60, seen[0].id)
+        return seen[0].id
 
     def start(self, user_id: str = 'mother', trigger: str = 'manual',
               initial_turn: VoiceTurn | None = None, opening_prompt: str = '', spoken_first: str = '',
