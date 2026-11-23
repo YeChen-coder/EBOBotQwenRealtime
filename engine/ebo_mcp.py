@@ -8,6 +8,12 @@ Bearer token — so a client must present `Authorization: Bearer <api_token>` to
 
 The point vs Home Assistant's generic MCP is the **look → decide → move** loop: ebo_look returns the
 live camera image, ebo_move drives, and move REFUSES without a recent look (no blind driving).
+
+Local addition (ebo-qwen-realtime): three family tools backed by the voice assistant's /mcp/* API
+(EBO_ASSISTANT_URL, same api_token as X-EBO-Control-Token). ebo_ask_mom hands the robot a question
+for mom, which it asks naturally in its next chat (household memory "concern", 3 days);
+ebo_check_asks reports whether it was asked and what was said; ebo_seen says when face recognition
+last saw someone. See ../family_link.py.
 """
 
 from __future__ import annotations
@@ -27,6 +33,9 @@ API = os.environ.get(
 TOKEN = os.environ.get("EBO_API_TOKEN", "")
 PORT = int(os.environ.get("EBO_MCP_PORT", "8100"))
 HEADERS = {"X-Enabot-Token": TOKEN}
+ASSISTANT = os.environ.get("EBO_ASSISTANT_URL", "http://realtime-assistant:8099").rstrip("/")
+ASSISTANT_HEADERS = {"X-EBO-Control-Token": os.environ.get("EBO_ASSISTANT_TOKEN", TOKEN)}
+READ_ONLY = {"readOnlyHint": True, "openWorldHint": False}
 
 MAX_SPEED = int(os.environ.get("EBO_MAX_SPEED", "45"))
 MAX_SECONDS = float(os.environ.get("EBO_MAX_SECONDS", "2.0"))
@@ -72,7 +81,35 @@ def _node(robots: list[dict], node: str) -> str:
     return node or (robots[0]["node"] if robots else "ebo")
 
 
-@mcp.tool()
+async def _state(node: str = "") -> dict:
+    # Plain helper, not the tool: FastMCP 2.x returned a FunctionTool from @mcp.tool() (callable via
+    # .fn), 3.x+ returns the function itself. ebo_move used `ebo_state.fn if hasattr(...) else {}`,
+    # which on the installed 4.2.5 silently skipped the on-the-charging-base check.
+    robots = await _robots()
+    node = _node(robots, node)
+    for r in robots:
+        if r.get("node") == node:
+            return {"node": node, "online": r.get("online"), "camera": r.get("camera"),
+                    **(r.get("state") or {})}
+    return {"error": f"robot '{node}' not found"}
+
+
+async def _assistant(method: str, path: str, **kw) -> dict:
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.request(method, ASSISTANT + path, headers=ASSISTANT_HEADERS, **kw)
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"voice assistant unreachable at {ASSISTANT}: {exc}") from exc
+    try:
+        data = r.json()
+    except ValueError:
+        data = {}
+    if r.status_code != 200:
+        raise RuntimeError(f"voice assistant said HTTP {r.status_code}: {data.get('error') or r.text[:200]}")
+    return data
+
+
+@mcp.tool(annotations=READ_ONLY)
 async def ebo_list() -> str:
     """List the EBO robots and their key state (battery, charging, docked, driving mode, obstacle
     avoidance, night vision). Call this first to learn the node name for the other tools."""
@@ -91,19 +128,13 @@ async def ebo_list() -> str:
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def ebo_state(node: str = "") -> dict:
     """Full live state of one robot. node from ebo_list(); empty = the first robot."""
-    robots = await _robots()
-    node = _node(robots, node)
-    for r in robots:
-        if r.get("node") == node:
-            return {"node": node, "online": r.get("online"), "camera": r.get("camera"),
-                    **(r.get("state") or {})}
-    return {"error": f"robot '{node}' not found"}
+    return await _state(node)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def ebo_look(node: str = "") -> Image:
     """SEE what the robot sees: a fresh live snapshot (JPEG). ALWAYS call this right before ebo_move
     to check the path is clear. If the image is black, call ebo_wake and retry after ~2 s."""
@@ -139,7 +170,7 @@ async def ebo_move(node: str = "", direction: str = "forward",
     if ago > LOOK_TTL:
         return (f"refused: no fresh camera view (last look {ago:.0f}s ago). Call ebo_look, confirm "
                 f"the path is clear, then move.")
-    st = await ebo_state.fn(node) if hasattr(ebo_state, "fn") else {}
+    st = await _state(node)
     if str(st.get("charging")) == "true" or str(st.get("docked")) == "true":
         return "refused: the robot is on the charging base."
     spd = max(1, min(int(speed), MAX_SPEED))
@@ -190,14 +221,8 @@ async def ebo_laser(node: str = "", on: bool = True) -> str:
     return f"laser -> {'on' if on else 'off'}."
 
 
-@mcp.tool()
-async def ebo_listen(node: str = "", on: bool = True) -> str:
-    """Open or close the robot's microphone. With it on you can hear the room through the robot
-    (the audio is carried inside the camera stream)."""
-    robots = await _robots()
-    node = _node(robots, node)
-    await _cmd(node, "listen/set", "on" if on else "off")
-    return f"listen -> {'on' if on else 'off'}."
+# ebo_listen removed: it sent the legacy listen/set, which the panel API now rejects (409), yet the
+# tool still reported success.
 
 
 @mcp.tool()
@@ -209,6 +234,37 @@ async def ebo_say(node: str = "", text: str = "") -> str:
         return "nothing to say."
     await _cmd(node, "say", text)
     return f"saying: {text!r}"
+
+
+@mcp.tool()
+async def ebo_ask_mom(question: str) -> str:
+    """Hand the home robot (猫猫) a question for 妈妈 from 姐姐 (the user). It is NOT asked right
+    away: the robot brings it up naturally, once, the next time it chats with mom (valid 3 days).
+    Write the question plainly in Chinese, e.g. "晚饭吃了什么" or "腰好点没". Check the answer later
+    with ebo_check_asks."""
+    entry = await _assistant("POST", "/mcp/ask", json={"question": question})
+    return (f"queued: 猫猫 will ask 妈妈 “{entry.get('question')}” in her next chat "
+            f"(valid until {entry.get('expires_on')}). Check later with ebo_check_asks.")
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def ebo_check_asks() -> dict:
+    """What happened to the questions 姐姐 asked the robot to pass on (last 14 days), newest first.
+    status: open = not asked yet; asked = the robot asked (robot_asked_on); resolved = settled;
+    expired = 3 days passed without asking; gone = dropped by the nightly memory tidy-up.
+    For asked/resolved items, `conversation` holds that day's chat after the request (妈妈那边 =
+    what the robot's microphone heard, may include TV or others; 猫猫 = the robot). Read it and tell
+    the user what mom actually said."""
+    return await _assistant("GET", "/mcp/asks")
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def ebo_seen(name: str = "妈妈", day: str = "today") -> dict:
+    """When the robot's camera recognized a family member's face on a given day (home time zone):
+    times_seen, first/last time, count by hour, and last_seen_before if not seen that day.
+    name: the face name (e.g. 妈妈; known_names lists all). day: today / yesterday / YYYY-MM-DD.
+    Only recognized faces count, so a person seen from behind is not included."""
+    return await _assistant("GET", "/mcp/seen", params={"name": name, "day": day})
 
 
 if __name__ == "__main__":

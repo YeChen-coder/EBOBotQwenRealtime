@@ -322,6 +322,13 @@ class MemoryStore:
                 self.save(data)
         return changed
 
+    def add_item(self, item: dict):
+        """直接加一条已经 clean_item 过的记忆（姐姐通过 MCP 托猫猫问的事，见 family_link.py）。"""
+        with self.lock:
+            data = self.load()
+            data['items'].append(item)
+            self.save(data)
+
     def forget(self, item_id: str) -> bool:
         with self.lock:
             data = self.load()

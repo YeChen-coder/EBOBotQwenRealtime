@@ -28,7 +28,7 @@ RUN pip install --no-cache-dir --retries 5 --timeout 60 \
 
 # MCP server for AI agents (optional, opt-in at runtime): non-fatal — if this can't be installed the
 # add-on still works, the MCP option just logs that it's unavailable.
-RUN pip install --no-cache-dir --retries 3 --timeout 60 "fastmcp>=2.0" httpx \
+RUN pip install --no-cache-dir --retries 3 --timeout 60 "fastmcp==4.2.5" httpx \
     || echo "WARN: fastmcp not installed — the MCP server option will be unavailable"
 
 # --- video-only extras (optional): a failure here must NOT break the add-on update ---

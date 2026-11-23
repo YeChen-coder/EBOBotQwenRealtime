@@ -13,3 +13,5 @@ Local change: `ebo_bridge.py` no longer lets a later RTC joiner (the official ap
 Build: `docker compose build ebo-engine`.
 
 Local change (2026-11-23): `ebo_bridge.py` initializes the Agora service once per process (`_agora_service`), releases replaced RTC connections (`_drop_rtc`), and keeps logged-out RTM clients referenced (`_retire_rtm`); token renewal renews the RTM token instead of leaving the old login on a stale token. Before this the bridge segfaulted (rc=139) about once a day. See `../docs/incident-2026-11-23-bridge-segfault.md`. Worth sending upstream.
+
+Local change (2026-11-23): `ebo_mcp.py` gains three family tools (`ebo_ask_mom`, `ebo_check_asks`, `ebo_seen`) backed by the assistant's `/mcp/*` endpoints (`../family_link.py`). Fixes: `ebo_move`'s on-the-charging-base check called `ebo_state.fn`, which FastMCP 3+ no longer has, so the check was silently skipped (now a plain `_state()` helper); `ebo_listen` removed (its `listen/set` is rejected by the panel API); read-only tools carry `readOnlyHint`. `Dockerfile` pins `fastmcp==4.2.5` (was `>=2.0`). The first fix is worth sending upstream.

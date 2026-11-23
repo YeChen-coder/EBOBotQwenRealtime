@@ -22,6 +22,7 @@ from ebo_transport import AudioStore, AssistantOutputStore, EboAPI, Speaker, Tra
 from monitoring import (DASHBOARD_HTML, LogBuffer, add_ice_host, mjpeg_url,
                         recent_conversation, setup_logging, whep_url)
 from greeter import HomecomingGreeter
+from family_link import FamilyLink
 from memory import MemoryManager, SessionRecord
 from weather_brief import WeatherBrief
 from bedtime import Bedtime
@@ -58,6 +59,7 @@ class Supervisor:
         self.bedtime: Bedtime | None = None   # main() 在启用睡前陪聊时设置
         self.memory: MemoryManager | None = None   # main() 设置；全家一份的记忆
         self.greeter: HomecomingGreeter | None = None
+        self.family: FamilyLink | None = None   # main() 设置；姐姐通过 MCP 托问、查见到记录
         self.wake.on_quiet_request = self.handle_quiet_request
         self.wake.on_dock_request = self.handle_dock_request
 
@@ -516,6 +518,46 @@ def make_http_handler(store: AudioStore, state: RuntimeState,
             self.end_headers()
             self.wfile.write(raw)
 
+        # ---- 姐姐的 MCP（engine/ebo_mcp.py 调这里），和 /session/* 一样要控制令牌 ----
+        def mcp_authorized(self) -> bool:
+            token = self.headers.get('X-EBO-Control-Token', '')
+            if token and hmac.compare_digest(token, config.control_token):
+                return True
+            self.send_json(403, {'error': 'invalid_control_token'})
+            return False
+
+        def mcp_get(self, path: str, params: dict):
+            if not self.mcp_authorized():
+                return None
+            family = supervisor.family
+            if family is None:
+                return self.send_json(503, {'error': 'family_link_disabled'})
+            if path == '/mcp/asks':
+                if supervisor.memory is None:
+                    return self.send_json(503, {'error': 'memory_disabled'})
+                return self.send_json(200, {'asks': family.asks(supervisor.memory.store)})
+            name = (params.get('name', ['妈妈'])[0] or '妈妈').strip()
+            try:
+                day = family.parse_day(params.get('day', ['today'])[0])
+            except ValueError:
+                return self.send_json(400, {'error': 'bad_day', 'hint': 'today / yesterday / YYYY-MM-DD'})
+            return self.send_json(200, family.seen(name, day))
+
+        def mcp_ask(self):
+            if not self.mcp_authorized():
+                return None
+            if supervisor.family is None or supervisor.memory is None:
+                return self.send_json(503, {'error': 'memory_disabled'})
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 < length <= 2048:
+                    return self.send_json(413, {'error': 'invalid_body_size'})
+                body = json.loads(self.rfile.read(length))
+                entry = supervisor.family.add_ask(supervisor.memory.store, str(body.get('question', '')))
+            except (ValueError, AttributeError) as exc:
+                return self.send_json(400, {'error': str(exc) or 'bad_request'})
+            return self.send_json(200, {'accepted': True, **entry})
+
         def do_GET(self):
             path, _, query = self.path.partition('?')
             if path in {'/', '/dashboard'}:
@@ -538,6 +580,9 @@ def make_http_handler(store: AudioStore, state: RuntimeState,
                 except ValueError:
                     after = 0
                 return self.send_json(200, log_buffer.since(after))
+
+            if path in ('/mcp/asks', '/mcp/seen'):
+                return self.mcp_get(path, parse_qs(query))
 
             if path == '/memory':
                 if supervisor.memory is None:
@@ -687,6 +732,8 @@ def make_http_handler(store: AudioStore, state: RuntimeState,
                 if self.headers.get('X-EBO-Dashboard') != '1':
                     return self.send_json(403, {'error': 'dashboard_only'})
                 return self.send_json(202, supervisor.dock_and_rest())
+            if self.path == '/mcp/ask':
+                return self.mcp_ask()
             if self.path not in {'/session/start', '/session/close', '/robot/dock',
                                  '/assistant/pause', '/assistant/resume'}:
                 return self.send_error(404)
@@ -843,9 +890,13 @@ def main():
         supervisor.memory = MemoryManager(config, state, is_idle=lambda: supervisor.active is None)
         supervisor.memory.start()
 
+    supervisor.family = FamilyLink(config.asks_path, config.sightings_path, config.home_timezone,
+                                   config.transcript_path, config.assistant_transcript_path)
+
     greeter = None
     if config.proactive_greeting:
         greeter = HomecomingGreeter(config, supervisor.greet_homecoming)
+        greeter.on_seen = supervisor.family.record_sighting
         greeter.start_mqtt()
         supervisor.greeter = greeter
 

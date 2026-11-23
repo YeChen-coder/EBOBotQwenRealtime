@@ -38,6 +38,7 @@ class HomecomingGreeter:
         self.lock = threading.Lock()
         self.client = None
         self.seen: dict[str, float] = {}   # 最近认出的人脸 -> 时间；记忆用它猜这场对话是谁在说
+        self.on_seen: Callable[[str, float], object] | None = None   # 记到见到记录里（family_link.py）
         # 第一次启用（没有记录）时当作“刚见过”：否则程序一启动，在家的人一出现就被欢迎回家
         for name in self.names:
             if not timers.has(config.timers_path, self._key(name)):
@@ -68,6 +69,11 @@ class HomecomingGreeter:
         name, score = sub[0], sub[1]
         if isinstance(score, (int, float)) and score >= self.config.min_face_score and isinstance(name, str):
             self.seen[name] = now
+            if self.on_seen is not None:
+                try:
+                    self.on_seen(name, now)
+                except Exception as exc:  # noqa: BLE001
+                    LOG.warning('Cannot record sighting: %s', exc)
         if name not in self.names or not isinstance(score, (int, float)) or score < self.config.min_face_score:
             return False
         with self.lock:

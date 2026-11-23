@@ -555,3 +555,20 @@ Fix:
 Live since midday 11-23 (restarted in the middle of the night at home, robot in standby). No renewal or rejoin was forced at deploy time, so it needs real ones to happen and a look at the log: seven days with no rc=139 counts as fixed.
 
 Full story (how it was found, evidence for both kinds of crash, lessons, what to do if it crashes again): [docs/incident-2026-11-23-bridge-segfault.md](docs/incident-2026-11-23-bridge-segfault.md)
+
+---
+
+Asking the robot to pass a question to mom, and checking when it last saw her, from Claude Code (11-23)
+Problem: living abroad, the only way to know whether mom had dinner, whether her back is better or whether she got up today was to wait for a call. The Engine ships an MCP server (a tool interface for AI assistants), but it was switched off and its tools only drive the robot and take pictures. Checking it before turning it on found two bugs:
+1. The "don't drive on the charging base" check never ran. The code called another tool the FastMCP 2.x way (`ebo_state.fn`); the container has 4.2.5, where that doesn't exist, so it silently used an empty state and skipped the check. The Dockerfile said `fastmcp>=2.0` with no pin.
+2. `ebo_listen` sent a retired command that the API rejects, yet the tool reported success.
+
+Fix:
+1. Asking: saying "have the robot ask mom what she had for dinner" in Claude Code adds a "concern" to the household memory (valid 3 days). At the start of a new conversation it shows up under "things you can ask about once", so the robot brings it up naturally ("姐姐让我问问妈妈…"); after the conversation the existing first memory layer decides whether it was asked or settled. A separate ledger (`data/memory/asks.json`) keeps the request even after memory drops settled items. When checking, asked items come with that day's conversation after the request, so Claude can say what mom actually said.
+2. Sightings: Frigate has recording and snapshots off, so it keeps no event history (/api/events returned nothing) and face results are only pushed live once. Every recognized family member is now written to `data/sightings.jsonl` (at most one line per person per minute, kept 14 days), so "did it see mom today?" gets the first and last time.
+3. The MCP gained `ebo_ask_mom`, `ebo_check_asks` and `ebo_seen` (implemented in `family_link.py` behind the assistant's `/mcp/*` endpoints, which take the same control token as `/session/*`); the charging-base check now reads the state directly; `ebo_listen` is gone; FastMCP is pinned to 4.2.5; read-only tools are marked read-only.
+4. The MCP port is open to this computer only (127.0.0.1:8100) and needs the api_token; it's registered in Claude Code for this project.
+
+Tests: `tests/test_family_link.py`; `tests/test_ebo_mcp.py` (runs in the engine container with FastMCP's in-memory client, including the charging-base check actually blocking). After deploying, the live server answered with the real token and rejected a wrong one.
+
+Live since the afternoon of 11-23 (assistant and Engine restarted in the middle of the night at home, robot in standby; restarting the Engine doesn't reset the seven-day watch on the bridge segfault fix). No real request has been sent yet. To check: whether the robot actually asks and sounds natural, and whether the first memory layer correctly marks it asked. Sightings will have data once the camera recognizes mom.

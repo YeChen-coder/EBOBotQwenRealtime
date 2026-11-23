@@ -151,6 +151,9 @@ class Config:
     assistant_transcript_path: str = '/data/assistant_outputs.jsonl'
     # 全家一份的记忆（memory.py）：memory.json / notes.json / seed.json（seed 是家人自己写的固定事实）
     memory_dir: str = '/data/memory'
+    # 姐姐通过 MCP 托问的账本、认出家人的记录（family_link.py）
+    asks_path: str = '/data/memory/asks.json'
+    sightings_path: str = '/data/sightings.jsonl'
     assistant_control_path: str = ''
 
     # 其他配置
@@ -278,6 +281,8 @@ class Config:
             'output_audio_dir': 'EBO_OUTPUT_AUDIO_DIR',
             'assistant_transcript_path': 'EBO_ASSISTANT_TRANSCRIPT_PATH',
             'memory_dir': 'EBO_MEMORY_DIR',
+            'asks_path': 'EBO_ASKS_PATH',
+            'sightings_path': 'EBO_SIGHTINGS_PATH',
             'memory_enabled': 'EBO_MEMORY_ENABLED',
             'memory_note_model': 'EBO_MEMORY_NOTE_MODEL',
             'memory_model': 'EBO_MEMORY_MODEL',
