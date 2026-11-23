@@ -528,3 +528,22 @@ Fix:
 2. On a voice wake-up, if the camera recognized exactly one family member (mom or dad) in the last 15 minutes, the conversation starts as that person. If both were recognized, or neither, it's still "family member", but the prompt now says: the household is mom and dad with no children, someone talking about "妈妈" is most likely mom talking about herself, don't tell them to look after mom, and don't call yourself dad, mom or 小叶子.
 
 Live since early 11-15 (restarted while the robot was in standby). Needs a few days to check: whether mom gets ignored when she really talks to it (especially lines without its name), and how often the camera recognizes her. Not changed yet: it casually promises things it can't do ("我这就把水端过来"), and repeats its last line when the other person only says "对".
+
+---
+
+The Engine bridge crashed about once a day; found why (11-23)
+Problem: from 11-14 on, the daily health check reported an "Engine bridge segfault" (rc=139) almost every day. It restarted by itself after about 15 s each time, so it was treated as occasional. Counting showed 37 crashes since 10-17, about one a day. Each left the robot deaf for a dozen seconds, and on 11-19 a reply to mom, just home, was lost.
+
+Cause: two bugs in the code that rejoins Agora. All 37 crashes were in bridge processes that had rejoined at least once; processes that never rejoined never crashed.
+1. Every 20 hours the credential renewal created a second Agora service without releasing the old one; a later rejoin then initialized the service again in the same process, and Agora's native library crashed (14 crashes, all inside its initialize function).
+2. On a rejoin the old messaging client (RTM) was logged out and its reference dropped. Python later collected its callbacks while Agora's native layer still called back into that memory, and it crashed (23 crashes, at random minutes to hours later).
+The crash dumps had been saved all along (WSL keeps core dumps automatically); after parsing them, both kinds of crash pointed to the same places.
+
+Fix:
+1. The Agora service is initialized once per process; rejoins and renewals replace only the connection; a replaced connection is disconnected and then released; old RTM clients stay referenced; on renewal RTM just gets the new token.
+2. If a reply was sent while the bridge was down, it's replayed once if the bridge is back within 50 s.
+3. PYTHONFAULTHANDLER is on, so a future crash prints the Python stack in the log.
+
+Live since midday 11-23 (restarted in the middle of the night at home, robot in standby). No renewal or rejoin was forced at deploy time, so it needs real ones to happen and a look at the log: seven days with no rc=139 counts as fixed.
+
+Full story (how it was found, evidence for both kinds of crash, lessons, what to do if it crashes again): [docs/incident-2026-11-23-bridge-segfault.md](docs/incident-2026-11-23-bridge-segfault.md)

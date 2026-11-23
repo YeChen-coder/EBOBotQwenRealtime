@@ -47,6 +47,13 @@ def motion_seconds(suffix: str, payload: str) -> float:
         return 3.0
     return 0.0
 
+# bridge 崩溃时丢掉的回复补播（Speaker._replay_if_bridge_down）
+REPLAY_CHECK_DELAY = 2.0   # 遗嘱消息几毫秒就到，2 秒足够看出 bridge 死没死
+REPLAY_WINDOW = 50.0       # bridge 等 15 秒重启、再初始化几秒；超过这么久的话就不补了
+REPLAY_POLL = 1.0
+REPLAY_SETTLE = 4.0
+
+
 class EboAPI:
     def __init__(self, config: Config, state: RuntimeState) -> None:
         self.config = config
@@ -101,6 +108,22 @@ class EboAPI:
         seconds = motion_seconds(suffix, payload)
         if seconds:
             MOTION.mark(seconds)
+
+    def bridge_online(self) -> bool | None:
+        """Engine 里连机器人的 bridge 进程是否在线（MQTT 遗嘱：进程一死就变 offline）。查不到返回 None。"""
+        try:
+            req = request.Request(
+                self.config.ebo_api_url + "/api/robots",
+                headers={"X-Enabot-Token": self.config.ebo_api_token},
+            )
+            with request.urlopen(req, timeout=5) as response:
+                robots = json.load(response)
+            for robot in robots:
+                if robot.get("node") == self.config.ebo_node:
+                    return bool(robot.get("online"))
+        except Exception:  # noqa: BLE001
+            return None
+        return None
 
     def robot_state(self) -> dict[str, object]:
         req = request.Request(
@@ -415,6 +438,8 @@ class Speaker:
         self._stream: _SpeakerStream | None = None
         self._prebuffer_bytes = config.stream_prebuffer_ms * 24000 * 2 // 1000
         self._recent_metrics: dict[str, dict[str, object]] = {}
+        # 每开始播一句就 +1：补播前用它确认这期间没有更新的回复
+        self._talk_seq = 0
 
     def input_muted(self) -> bool:
         with self._mute_lock:
@@ -448,6 +473,7 @@ class Speaker:
             generation=self._generation,
         )
         self._stream = stream
+        self._talk_seq += 1
         with self._mute_lock:
             self._stream_active = True
         self.state.update(
@@ -803,6 +829,9 @@ class Speaker:
             self._mute_until = time.monotonic() + duration + max(1.5, self.config.playback_tail_ms/1000)
         url = f"{self.config.public_audio_base_url}/{name}"
         self.ebo.command("talk", url)
+        self._talk_seq += 1
+        threading.Thread(target=self._replay_if_bridge_down, args=(self._talk_seq, url, duration),
+                         name="talk-replay", daemon=True).start()
         snapshot = self.state.snapshot()
         values = {
             "last_reply_at": time.time(),
@@ -814,6 +843,41 @@ class Speaker:
             ) + 1
         self.state.update(**values)
         LOG.info("sent %.1fs reply to EBO speaker by WAV URL", duration)
+
+    def _replay_if_bridge_down(self, seq: int, url: str, duration: float) -> None:
+        """bridge 段错误重启的那十几秒里发出的 talk 没人收，这句就丢了（11-19 08:18）。
+        发出后看一眼 bridge 是否在线；不在线就等它回来，期间没有更新的回复才补播一次。
+        见 docs/incident-2026-11-23-bridge-segfault.md。"""
+        sent = time.monotonic()
+        time.sleep(REPLAY_CHECK_DELAY)
+        if self.ebo.bridge_online() is not False:
+            return
+        LOG.warning("Robot bridge was offline when a %.1fs reply was sent; will replay it when it is back",
+                    duration)
+        while time.monotonic() - sent < REPLAY_WINDOW:
+            time.sleep(REPLAY_POLL)
+            if seq != self._talk_seq or not self._enabled:
+                LOG.info("Lost reply not replayed: a newer reply or a pause came first")
+                return
+            if self.ebo.bridge_online():
+                # bridge 上线后还要连 RTC；它会把早到的 talk 排队，等连上再播
+                time.sleep(REPLAY_SETTLE)
+                with self._stream_lock:
+                    if seq != self._talk_seq or not self._enabled:
+                        return
+                    with self._mute_lock:
+                        self._mute_until = (time.monotonic() + REPLAY_SETTLE + duration
+                                            + max(1.5, self.config.playback_tail_ms / 1000))
+                    try:
+                        self.ebo.command("talk", url)
+                    except Exception as exc:  # noqa: BLE001
+                        LOG.warning("Replaying the lost reply failed: %s", exc)
+                        return
+                LOG.warning("Replayed a %.1fs reply lost while the robot bridge restarted (%.0fs late)",
+                            duration, time.monotonic() - sent)
+                self.state.increment("replies_replayed_after_bridge_restart")
+                return
+        LOG.warning("Robot bridge did not come back within %ds; reply not replayed", REPLAY_WINDOW)
 
     def play(self, pcm: bytes, output_id: str = "") -> None:
         if not pcm:

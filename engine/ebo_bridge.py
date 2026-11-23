@@ -329,6 +329,12 @@ class Bridge:
         self.host_ip = os.environ.get("EBO_HOST_IP", "")
         self._observers_registered = False
         self.svc = None                        # Agora service (global param handle lives here)
+        # Replaced RTM clients are logged out but kept alive for the life of the process: the
+        # native client can still call back after logout, and if its Python callback table had
+        # been garbage-collected that call jumps into freed memory (segfault, rc=139). See
+        # docs/incident-2026-11-23-bridge-segfault.md.
+        self._retired_rtm = []
+        self._rtm_gen = None
         self._video_lock = threading.Lock()   # serialize setup/subscribe (2 callers race)
         self._rejoin_lock = threading.Lock()  # only one cloud/Agora rebuild may run at a time
         self._last_rejoin = 0.0
@@ -369,6 +375,80 @@ class Bridge:
                 and getattr(obs, "_n", [0])[0] == 0):
             log("[audio-recovery] bounded retries exhausted; source health remains failed")
         return "exhausted"
+
+    def _agora_service(self):
+        """Create and initialize the Agora service ONCE per process; every reconnect reuses it.
+
+        Re-initializing it in the same process crashes inside the native SDK
+        (agora_service_initialize, rc=139): 14 of the bridge's 37 segfaults up to 11-23 happened
+        exactly there, always on a rejoin after a token renewal. Only RTC connections are
+        created and released per session. See docs/incident-2026-11-23-bridge-segfault.md.
+        """
+        if self.svc is not None:
+            return self.svc
+        s = self.s
+        svc = AgoraService()
+        scfg = AgoraServiceConfig()
+        scfg.appid = s["app_id"]
+        # REQUIRED to receive/decode video — without this the frame observer gets 0 frames.
+        if self.video_enabled:
+            try:
+                scfg.enable_video = 1
+            except Exception:
+                pass
+        if self.agora_apm_enabled:
+            scfg.enable_apm = True
+            scfg.apm_config = _build_apm_config(
+                self.agora_aec_enabled,
+                self.agora_noise_suppression_enabled,
+                self.agora_agc_enabled,
+            )
+        log("[audio-apm] requested: aec=%s noise_suppression=%s agc=%s apm=%s" % (
+            "on" if self.agora_aec_enabled else "off",
+            "on" if self.agora_noise_suppression_enabled else "off",
+            "on" if self.agora_agc_enabled else "off",
+            "on" if self.agora_apm_enabled else "off",
+        ))
+        init_rc = svc.initialize(scfg)
+        if init_rc != 0:
+            raise RuntimeError(
+                "Agora service initialization failed (rc=%s, APM requested=%s)" % (
+                    init_rc, self.agora_apm_enabled
+                )
+            )
+        log("[audio-apm] Agora service initialized (rc=0, apm=%s)" % (
+            "on" if self.agora_apm_enabled else "off"
+        ))
+        self.svc = svc
+        return svc
+
+    def _drop_rtc(self):
+        """Disconnect AND release the current RTC connection (its observers are unregistered
+        with it). Dropping the Python object without release() left the native connection
+        alive with observers Python might free later."""
+        old, self.rtc = self.rtc, None
+        if old:
+            try:
+                old.disconnect()
+            except Exception:
+                pass
+            try:
+                old.release()
+            except Exception as e:
+                log("[RTC] release of the old connection failed:", e)
+        self.rtc_state = None
+        self._observers_registered = False
+
+    def _retire_rtm(self):
+        """Log the current RTM client out and keep it referenced (never garbage-collected)."""
+        old, self.rtm = self.rtm, None
+        self._rtm_gen = None
+        if old:
+            try:
+                old.logout()
+            except Exception:
+                pass
+            self._retired_rtm.append(old)
 
     def connect_agora(self):
         s = self.s
@@ -458,14 +538,18 @@ class Bridge:
 
         bridge = self
 
+        rtm_gen = object()
+
         class RtmH(IRtmEventHandler):
             def on_message_event(o, event):
-                bridge._on_rtm(event)
+                if bridge._rtm_gen is rtm_gen:     # a retired client's late message: drop it
+                    bridge._on_rtm(event)
 
             def on_login_result(o, req, err):
                 log("[RTM] login result:", err)
 
         if self.rtm is None:      # reuse an existing RTM login (telemetry) across RTC reconnects
+            self._rtm_gen = rtm_gen
             self.rtm = create_rtm_client(RtmConfig(
                 app_id=s["app_id"], user_id=s["rtm_user"], use_string_user_id=1,
                 presence_timeout=300, heartbeat_interval=5, event_handler=RtmH(),
@@ -479,39 +563,7 @@ class Bridge:
         else:
             log("[RTM] reusing existing login")
 
-        svc = AgoraService()
-        scfg = AgoraServiceConfig()
-        scfg.appid = s["app_id"]
-        # REQUIRED to receive/decode video — without this the frame observer gets 0 frames.
-        if self.video_enabled:
-            try:
-                scfg.enable_video = 1
-            except Exception:
-                pass
-        if self.agora_apm_enabled:
-            scfg.enable_apm = True
-            scfg.apm_config = _build_apm_config(
-                self.agora_aec_enabled,
-                self.agora_noise_suppression_enabled,
-                self.agora_agc_enabled,
-            )
-        log("[audio-apm] requested: aec=%s noise_suppression=%s agc=%s apm=%s" % (
-            "on" if self.agora_aec_enabled else "off",
-            "on" if self.agora_noise_suppression_enabled else "off",
-            "on" if self.agora_agc_enabled else "off",
-            "on" if self.agora_apm_enabled else "off",
-        ))
-        init_rc = svc.initialize(scfg)
-        if init_rc != 0:
-            raise RuntimeError(
-                "Agora service initialization failed (rc=%s, APM requested=%s)" % (
-                    init_rc, self.agora_apm_enabled
-                )
-            )
-        log("[audio-apm] Agora service initialized (rc=0, apm=%s)" % (
-            "on" if self.agora_apm_enabled else "off"
-        ))
-        self.svc = svc
+        svc = self._agora_service()
         # AUDIO codec: the robot streams its mic with a custom telephony codec (Agora payload
         # type 8 = monitor / 9 = call). Agora's own guidance for this case (payload 8 = G.711)
         # is that che.audio.codec_unfallback + custom_payload_type must be set on the GLOBAL
@@ -1415,34 +1467,10 @@ class Bridge:
             # A sender belongs to one RTC connection. Never let the old TX loop
             # survive into the replacement session; queued sources remain queued.
             self._stop_audio_tx()
-            try:
-                old_rtc, self.rtc = self.rtc, None
-                if old_rtc:
-                    try:
-                        old_rtc.disconnect()
-                    except Exception:
-                        pass
-                    try:
-                        old_rtc.release()
-                    except Exception:
-                        pass
-                old_svc, self.svc = self.svc, None
-                if old_svc:
-                    try:
-                        old_svc.release()
-                    except Exception:
-                        pass
-                # IMPORTANT: logout makes this RTM object unusable. The old implementation logged
-                # out and then connect_agora() saw a non-None object and "reused" it, leaving the
-                # robot present in RTC but unable to receive wake/camera/quality commands.
-                old_rtm, self.rtm = self.rtm, None
-                if old_rtm:
-                    try:
-                        old_rtm.logout()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            # Keep the Agora service: re-initializing it crashed the native SDK (see
+            # _agora_service). Replace only the RTC connection and the RTM client.
+            self._drop_rtc()
+            self._retire_rtm()
             self.rtc_state = None
             self.robot_uid = None
             self.other_viewers.clear()
@@ -1491,22 +1519,11 @@ class Bridge:
                     self.video.stop_feed()
             except Exception:
                 pass
-            try:
-                if self.rtc:
-                    self.rtc.disconnect()
-            except Exception:
-                pass
+            self._drop_rtc()
             # Full disconnect (known-good standby): also log out RTM so the robot reliably sleeps.
             # (The 0.26.32 "keep RTM" experiment is deferred to the auto-standby plan — reverted here
             # so the shipped standby stays reliable until we can verify the RTC-only behaviour.)
-            try:
-                if self.rtm:
-                    self.rtm.logout()
-            except Exception:
-                pass
-            self.rtm = None
-            self.rtc = None
-            self._observers_registered = False
+            self._retire_rtm()
             # Standby stops the video too — reflect it so Home Assistant shows a clear change
             # (otherwise the camera switch stays "on" and it looks like nothing happened).
             self.video_on = False
@@ -2622,11 +2639,20 @@ class Bridge:
                     # The TX loop holds the old connection's sender: stop it, or the new connection
                     # never publishes and every talk "plays" into the dead one (11-08: silent ~13 h).
                     self._stop_audio_tx()
-                    # reconnect Agora with the new tokens
-                    try:
-                        self.rtc.disconnect()
-                    except Exception:
-                        pass
+                    # Reconnect RTC with the new tokens: release the old connection (it used to be
+                    # dropped unreleased) but keep the service. The RTM login stays and gets the
+                    # new token; if that is refused, log in afresh.
+                    self._drop_rtc()
+                    if self.rtm:
+                        try:
+                            r, _ = self.rtm.renew_token(self.s["rtm_token"])
+                        except Exception as e:
+                            r = e
+                        if r != 0:
+                            log("[RTM] token renewal refused (%s); logging in again" % r)
+                            self._retire_rtm()
+                        else:
+                            log("[RTM] token renewed")
                     self.connect_agora()
                     self.send(OP_HANDSHAKE, {"userId": self.account})
         except KeyboardInterrupt:

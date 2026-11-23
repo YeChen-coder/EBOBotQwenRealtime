@@ -11,3 +11,5 @@ Local change in this project: `panel.py` `goBack()` no longer sends `connected/s
 Local change: `ebo_bridge.py` no longer lets a later RTC joiner (the official app) replace the robot uid — it used to point our audio subscription at the app and cut the mic. The uid that actually sends audio is saved to `/data/robot_uid`; other joiners are reported as `other_viewers` in audio_health.
 
 Build: `docker compose build ebo-engine`.
+
+Local change (2026-11-23): `ebo_bridge.py` initializes the Agora service once per process (`_agora_service`), releases replaced RTC connections (`_drop_rtc`), and keeps logged-out RTM clients referenced (`_retire_rtm`); token renewal renews the RTM token instead of leaving the old login on a stale token. Before this the bridge segfaulted (rc=139) about once a day. See `../docs/incident-2026-11-23-bridge-segfault.md`. Worth sending upstream.

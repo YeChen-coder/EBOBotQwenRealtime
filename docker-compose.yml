@@ -78,6 +78,8 @@ services:
       EBO_AGORA_AEC_ENABLED: "false"
       EBO_AGORA_NOISE_SUPPRESSION_ENABLED: "true"  # 机器人麦克风降噪（风扇、空调等稳定噪声）
       EBO_AGORA_AGC_ENABLED: "false"
+      # bridge 崩溃（段错误）时把各线程的 Python 栈打进日志（见 docs/incident-2026-11-23-bridge-segfault.md）
+      PYTHONFAULTHANDLER: "1"
       TZ: ${TZ:-America/Toronto}
     networks: [ebo]
     logging: *bounded-logging
