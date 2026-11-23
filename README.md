@@ -4,6 +4,14 @@
 
 > **This is the third generation of [EBOBotToDigitalPet](https://github.com/YeChen-coder/EBOBotToDigitalPet), rewritten as a separate, local-only project.** If you want the full story — local + cloud, Diagnostic Agent, monitoring dashboard — start with v1.
 
+> **A note first: if you're starting from nothing, Agora's own Conversational AI Engine is probably the fastest way to get something working.**
+>
+> The EBO robot already sends its audio and video over Agora. Agora now has a fairly mature voice-agent product, the Conversational AI Engine (called 对话式 AI 引擎 by Shengwang in China). Noise suppression, VAD, interruptions, end-of-turn detection and speech recognition are all built in. You plug in whatever LLM and TTS you like, and it can take camera input too. It works in mainland China and overseas. The catch is that it's closed source, so you can't change how it works.
+>
+> I didn't go that way because this project grew on top of the robot as the vendor ships it, one piece at a time (I ordered an EBO Air 2S on December 9, 2025. It has no built-in AI, its audio and video go through the manufacturer's own Agora network, and I don't have an Agora account of my own). It was never a blank-slate choice. So you can think of this project as my own re-implementation of Agora's Conversational AI Engine. If you have nothing yet and just want a robot that talks, that's the easiest route.
+>
+> <sub>Pricing is on Agora's and Shengwang's websites. It's billed per minute and runs on the developer's own Agora account.</sub>
+
 ## Where this sits in the project family
 
 | Generation | Where | What it is |

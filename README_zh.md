@@ -4,6 +4,14 @@
 
 > **这是 [EBOBotToDigitalPet](https://github.com/YeChen-coder/EBOBotToDigitalPet) 的第三代重构，单独开了一个仓库，只在本地跑。** 想看完整的故事（本地 + 云端、Diagnostic Agent、监控看板），请从第一版看起。
 
+> **先说一句：如果你是从零开始做，直接用 Agora 自己的 Conversational AI Engine 可能更快出效果。**
+>
+> EBO 机器人的音视频本来就是走 Agora（声网）的。Agora 现在已经有一套挺成熟的对话式 AI 方案，叫 Conversational AI Engine（国内叫"对话式 AI 引擎"）。降噪、VAD、打断、判断一句话说没说完、语音识别，它都做好了；大模型和语音合成接你自己选的就行，也能接摄像头画面。国内和海外都能用。可惜是闭源的，想按自己的需要改就改不了。
+>
+> 我没走这条路，是因为这个项目一开始就是在厂家的机器人上一点点搭起来的（我 2025 年 12 月 9 日下单的 EBO Air 2S，本身没有 AI 功能；它的音视频走的是厂家自己的 Agora 网络，我没有自己的 Agora 账号），不是什么都没有、从头挑方案。所以也可以把这个项目理解成：我自己把 Agora 的 Conversational AI Engine 实现了一遍。如果你手上什么都没有，只想最快做出一个能聊天的机器人，用它最省事。
+>
+> <sub>价格表在 Agora / 声网官网上，按分钟计费，要用开发者自己的 Agora 账号。</sub>
+
 ## 这个项目的来龙去脉
 
 | 版本 | 位置 | 是什么 |
