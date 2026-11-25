@@ -572,3 +572,14 @@ Fix:
 Tests: `tests/test_family_link.py`; `tests/test_ebo_mcp.py` (runs in the engine container with FastMCP's in-memory client, including the charging-base check actually blocking). After deploying, the live server answered with the real token and rejected a wrong one.
 
 Live since the afternoon of 11-23 (assistant and Engine restarted in the middle of the night at home, robot in standby; restarting the Engine doesn't reset the seven-day watch on the bridge segfault fix). No real request has been sent yet. To check: whether the robot actually asks and sounds natural, and whether the first memory layer correctly marks it asked. Sightings will have data once the camera recognizes mom.
+
+---
+
+The robot sent no audio for a whole day; a firmware upgrade fixed it (11-25)
+Problem: the daily check found that from 02:49 on 11-25 the robot stopped sending any audio, more than ten hours by the afternoon. The assistant log had over 4000 "Audio stream unavailable" lines that day, against a few dozen on a normal day. The robot stayed online and on its charging base, and Agora showed its audio track as published, but not a single byte arrived; video also stopped a few seconds after each rejoin. The Engine rejoined about 580 times and asked the robot to open its mic each time, with no effect.
+
+Cause: the problem was on the robot's side, not in our code. Signing in to the phone app showed a prompt to upgrade the robot's firmware.
+
+Fix: stopped the Engine first, so nothing on this computer was connected to the robot and couldn't interrupt the upgrade. After upgrading the firmware in the phone app, started the Engine again; audio arrived as soon as it connected, and video was stable.
+
+Recovered on the afternoon of 11-25 (middle of the night at home, assistant in standby).
