@@ -583,3 +583,36 @@ Cause: the problem was on the robot's side, not in our code. Signing in to the p
 Fix: stopped the Engine first, so nothing on this computer was connected to the robot and couldn't interrupt the upgrade. After upgrading the firmware in the phone app, started the Engine again; audio arrived as soon as it connected, and video was stable.
 
 Recovered on the afternoon of 11-25 (middle of the night at home, assistant in standby).
+
+---
+
+Today is November 27, 2026, the third day after the firmware upgrade. Up front: I don't know what happened, and I'm pretty baffled myself.
+
+Here's the situation. This is what happened after the firmware upgrade:
+In the early hours of November 25, I saw errors all over the dashboard. So I upgraded the robot's firmware, and the phone app it connects to as well.
+
+For a short while right after the upgrade, everything worked. I even used the phone app to set it a new cruise path, and the robot drove forward and backward fine.
+
+But from then on, driving the robot from the phone went badly wrong.
+
+Note that this is the manufacturer's own app, not something I wrote. I'm certain it's the latest version: the firmware upgrade itself showed a prompt saying to use the latest app, so I'm sure the app was updated on November 24.
+Then came a pile of problems:
+1. It won't move, which is strange.
+2. Turning works: the two tracks move one forward and one back, as they should, so turning is fine.
+3. But a forward or backward command gets no response; it just spins in place instead of moving.
+
+I checked the tracks underneath, wondering whether something like hair had got tangled in them, jamming one track so only the other one turned and spun it in place. Nothing; everything looked normal, yet it still wouldn't move.
+
+Completely baffled, I tried a few ways to debug it. But the account can only be signed in in one place: if the ebo engine in my program signs in, it kicks the phone app off; if the phone signs in, the ebo engine can't connect and gets none of the logs. So that's where it got stuck.
+
+At this point I had a thought: could it be the network? Whether from the phone or from the program, any manual move has to send a command through the robot's cloud.
+
+But it isn't completely unable to go forward or back. Out of roughly 20 tries, one works and the rest don't; it just stays put. Now even turning is unreliable: the turning I said worked earlier doesn't turn well anymore. The whole thing is baffling and bizarre.
+
+So it isn't a problem with my program. Most likely it's either the phone app, the vendor's Agora cloud network, or something in the robot's newly updated firmware.
+
+Add to that whatever mess comes with sending everything halfway around the world. Either way it's definitely not my program, it's the manufacturer's problem, so there's nothing I can do about it. It's become an unsolved mystery.
+
+So for now I've started the program I'd stopped earlier again. That's it, really, that's it. Once it was running I tried it: it still follows people normally, my computer is sending commands over the network to the little robot normally, its movements are right, and the video coming back is right. So the unsolved mystery will have to rest here for now.
+
+And even if this needed fixing or bug-hunting, that isn't on my side; it's still the manufacturer's problem.
